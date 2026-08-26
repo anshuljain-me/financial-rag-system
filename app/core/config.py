@@ -1,38 +1,31 @@
+import os
 from pathlib import Path
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from functools import lru_cache
+from pydantic_settings import BaseSettings
 
-# Resolve the absolute path to the root directory: financial-rag-system/.env
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
-ENV_FILE_PATH = BASE_DIR / ".env"
+# Automatically bridge Streamlit Cloud secrets to environment variables if running in Cloud
+try:
+    import streamlit as st
+    if hasattr(st, "secrets"):
+        for key in ["NEON_DB_ASYNC_URL", "NEON_DB_SYNC_URL", "GEMINI_API_KEY", "API_SECRET_KEY"]:
+            if key in st.secrets and key not in os.environ:
+                os.environ[key] = str(st.secrets[key])
+except Exception:
+    pass
 
 class Settings(BaseSettings):
-    """
-    Application Settings loaded dynamically from .env.
-    Uses Pydantic BaseSettings for strict type validation.
-    """
-    APP_ENV: str = "development"
-    DEBUG: bool = True
-    PROJECT_NAME: str = "Financial RAG & Analytics Platform"
-
-    # Database connection strings
-    DATABASE_URL: str
-    SYNC_DATABASE_URL: str
-
-    # Google AI Studio / Gemini API Configurations
-    GEMINI_API_KEY: str
-    GEMINI_GENERATIVE_MODEL: str = "gemini-1.5-pro"
-    GEMINI_FAST_MODEL: str = "gemini-1.5-flash"
-    GEMINI_EMBEDDING_MODEL: str = "models/text-embedding-004"
+    PROJECT_NAME: str = "Institutional Financial RAG & SEC Intelligence"
+    BASE_DIR: Path = Path(__file__).resolve().parent.parent.parent
+    
+    NEON_DB_ASYNC_URL: str = os.getenv("NEON_DB_ASYNC_URL", "")
+    NEON_DB_SYNC_URL: str = os.getenv("NEON_DB_SYNC_URL", "")
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    API_SECRET_KEY: str = os.getenv("API_SECRET_KEY", "financial-rag-prod-secret-key-2026")
     EMBEDDING_DIMENSION: int = 768
 
-    model_config = SettingsConfigDict(
-        env_file=str(ENV_FILE_PATH),
-        env_file_encoding="utf-8",
-        extra="ignore"
-    )
+    class Config:
+        env_file = Path(__file__).resolve().parent.parent.parent / ".env"
+        env_file_encoding = "utf-8"
+        extra = "ignore"
 
-@lru_cache()
 def get_settings() -> Settings:
-    """Returns a cached instance of application settings."""
     return Settings()
