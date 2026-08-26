@@ -1,43 +1,42 @@
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+import os
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from sqlalchemy.pool import NullPool
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from app.core.config import get_settings
 
 settings = get_settings()
 
-# Normalize database URL for asyncpg
-db_url = settings.DATABASE_URL
-if "sslmode=require" in db_url:
-    db_url = db_url.replace("sslmode=require", "ssl=require")
-elif "?" not in db_url and "neon.tech" in db_url:
-    db_url = f"{db_url}?ssl=require"
+# 1. Async Database Engine (NullPool for thread-safe asynchronous operations)
+raw_async_url = settings.NEON_DB_ASYNC_URL or settings.DATABASE_URL
+if raw_async_url.startswith("postgres://"):
+    raw_async_url = raw_async_url.replace("postgres://", "postgresql+asyncpg://", 1)
+elif raw_async_url.startswith("postgresql://") and not raw_async_url.startswith("postgresql+asyncpg://"):
+    raw_async_url = raw_async_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-# NullPool ensures asyncpg connections are never leaked across different asyncio event loops
-engine = create_async_engine(
-    db_url,
-    echo=False,
-    future=True,
-    poolclass=NullPool
+async_engine = create_async_engine(
+    raw_async_url,
+    poolclass=NullPool,
+    echo=False
 )
 
 AsyncSessionLocal = async_sessionmaker(
-    bind=engine,
+    bind=async_engine,
     class_=AsyncSession,
-    expire_on_commit=False,
-    autocommit=False,
-    autoflush=False
+    expire_on_commit=False
 )
 
-# Synchronous Engine & Session (Thread-safe for Streamlit UI)
-sync_db_url = settings.SYNC_DATABASE_URL
-if "postgresql+asyncpg://" in sync_db_url:
-    sync_db_url = sync_db_url.replace("postgresql+asyncpg://", "postgresql://")
+# 2. Synchronous Database Engine (for Streamlit thread-safe reads)
+raw_sync_url = settings.NEON_DB_SYNC_URL or settings.SYNC_DATABASE_URL or settings.DATABASE_URL
+if raw_sync_url.startswith("postgresql+asyncpg://"):
+    raw_sync_url = raw_sync_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+elif raw_sync_url.startswith("postgres://"):
+    raw_sync_url = raw_sync_url.replace("postgres://", "postgresql://", 1)
 
 sync_engine = create_engine(
-    sync_db_url,
-    echo=False,
-    pool_pre_ping=True
+    raw_sync_url,
+    poolclass=NullPool,
+    echo=False
 )
 
 SyncSessionLocal = sessionmaker(
@@ -50,13 +49,6 @@ class Base(DeclarativeBase):
     pass
 
 async def init_db():
-    async with engine.begin() as conn:
+    async with async_engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
         await conn.run_sync(Base.metadata.create_all)
-
-async def get_db():
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
