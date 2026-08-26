@@ -1,0 +1,38 @@
+# --- Core API & Async Framework ---
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.8.0
+pydantic-settings>=2.4.0
+python-dotenv>=1.0.1
+
+# --- Database & Vector Store ---
+SQLAlchemy>=2.0.32
+psycopg2-binary>=2.9.9
+asyncpg>=0.29.0
+pgvector>=0.3.2
+redis>=5.0.8
+
+# --- LLM & Orchestration (Gemini & LlamaIndex) ---
+google-genai>=0.1.1
+google-generativeai>=0.8.0
+llama-index-core>=0.11.0
+llama-index-llms-gemini>=0.3.0
+llama-index-embeddings-gemini>=0.2.0
+llama-index-vector-stores-postgres>=0.2.0
+
+# --- Financial PDF & Table Parsing ---
+pymupdf>=1.24.9
+pdfplumber>=0.11.4
+pypdf>=4.3.0
+rank_bm25>=0.2.2
+tiktoken>=0.7.0
+
+# --- Quantitative Analytics & Market Data ---
+yfinance>=0.2.43
+pandas>=2.2.2
+numpy>=1.26.4
+ta>=0.11.0
+plotly>=5.24.0
+
+# --- Frontend Dashboard ---
+streamlit>=1.38.0
