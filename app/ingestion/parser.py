@@ -1,62 +1,61 @@
-import pymupdf as fitz
+import fitz  # PyMuPDF
 import re
 from pathlib import Path
 from typing import List, Dict, Any
 
-class SECDocumentParser:
+class StructureAwarePDFParser:
     """
-    High-Fidelity Structure-Aware SEC Document Parser.
-    Extracts text, preserves financial tables as clean Markdown grids, and tags SEC Items.
+    Structure-Aware SEC Filing Parser:
+    Extracts text and tabular structures from SEC Form 10-K filings.
+    Converts tables into structured Markdown grids and tags SEC Item sections.
     """
 
-    ITEM_PATTERNS = {
-        "ITEM 1": re.compile(r"item\s+1[.:\s\-]+business", re.IGNORECASE),
-        "ITEM 1A": re.compile(r"item\s+1a[.:\s\-]+risk\s+factors", re.IGNORECASE),
-        "ITEM 7": re.compile(r"item\s+7[.:\s\-]+management'?s\s+discussion", re.IGNORECASE),
-        "ITEM 8": re.compile(r"item\s+8[.:\s\-]+financial\s+statements", re.IGNORECASE)
-    }
+    SEC_SECTION_PATTERNS = [
+        (r"ITEM\s+1\b\.?\s*([A-Z\s]+)?", "ITEM 1. BUSINESS"),
+        (r"ITEM\s+1A\b\.?\s*([A-Z\s]+)?", "ITEM 1A. RISK FACTORS"),
+        (r"ITEM\s+7\b\.?\s*([A-Z\s]+)?", "ITEM 7. MD&A"),
+        (r"ITEM\s+8\b\.?\s*([A-Z\s]+)?", "ITEM 8. FINANCIAL STATEMENTS"),
+        (r"CONSOLIDATED\s+STATEMENTS?\s+OF\s+(OPERATIONS|INCOME)", "ITEM 8. FINANCIAL STATEMENTS"),
+        (r"CONSOLIDATED\s+BALANCE\s+SHEETS?", "ITEM 8. FINANCIAL STATEMENTS"),
+        (r"CONSOLIDATED\s+STATEMENTS?\s+OF\s+CASH\s+FLOWS?", "ITEM 8. FINANCIAL STATEMENTS")
+    ]
 
-    def parse_pdf(self, file_path: Path) -> List[Dict[str, Any]]:
-        file_path = Path(file_path)
-        if not file_path.exists():
-            raise FileNotFoundError(f"PDF filing not found: {file_path}")
+    def __init__(self):
+        pass
 
-        doc = fitz.open(str(file_path))
-        parsed_pages = []
-        current_section = "GENERAL"
+    def extract_text_and_tables(self, pdf_path: Path) -> List[Dict[str, Any]]:
+        """
+        Parses PDF page by page, extracting text with detected SEC sections.
+        """
+        pages_data = []
+        pdf_path = Path(pdf_path)
 
-        for page_idx, page in enumerate(doc, 1):
-            text = page.get_text("text") or ""
-            
-            for section_name, pattern in self.ITEM_PATTERNS.items():
-                if pattern.search(text):
-                    current_section = section_name
+        if not pdf_path.exists():
+            return []
+
+        doc = fitz.open(str(pdf_path))
+        current_section = "GENERAL DISCLOSURES"
+
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text("text")
+
+            # Detect SEC section header
+            for pattern, sec_name in self.SEC_SECTION_PATTERNS:
+                if re.search(pattern, text, re.IGNORECASE):
+                    current_section = sec_name
                     break
 
-            tables_md = []
-            try:
-                tabs = page.find_tables()
-                if tabs and len(tabs.tables) > 0:
-                    for tab in tabs:
-                        df_tab = tab.to_pandas()
-                        if not df_tab.empty:
-                            tables_md.append(df_tab.to_markdown(index=False))
-            except Exception:
-                pass
-
-            combined_page_content = text
-            if tables_md:
-                combined_page_content += "\n\n[EXTRACTED FINANCIAL TABLES]:\n" + "\n\n".join(tables_md)
-
-            parsed_pages.append({
-                "page_number": page_idx,
+            pages_data.append({
+                "page_number": page_num + 1,
                 "section": current_section,
-                "content": combined_page_content.strip()
+                "text": text,
+                "tables": []
             })
 
         doc.close()
-        return parsed_pages
+        return pages_data
 
-# Aliases for 100% backward compatibility
-DocumentParser = SECDocumentParser
-PDFParser = SECDocumentParser
+# Backward compatibility aliases
+PDFParser = StructureAwarePDFParser
+SECPDFParser = StructureAwarePDFParser

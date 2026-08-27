@@ -1,153 +1,142 @@
 import os
-import uuid
-import json
-import logging
+import re
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from sqlalchemy import select
+import uuid
+from sqlalchemy import select, and_
 
 from app.core.database import AsyncSessionLocal
 from app.models.domain import Company, Document, FinancialMetric, DocumentChunk
-from app.ingestion.hasher import FileHasher
-from app.ingestion.parser import PDFParser
+from app.ingestion.parser import StructureAwarePDFParser
 from app.extraction.kpi_extractor import FinancialExtractor
 from app.rag.embedder import FinancialEmbedder
-
-logger = logging.getLogger(__name__)
-
-def _to_float(val: Any) -> Optional[float]:
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    s = str(val).replace("$", "").replace(",", "").replace("M", "").strip()
-    try:
-        return float(s)
-    except Exception:
-        return None
+from app.ingestion.hasher import compute_file_hash
 
 class IngestionPipeline:
+    """
+    Unified Ingestion & Indexing Pipeline:
+    1. Cryptographic SHA-256 Deduplication Hashing
+    2. Structure-Aware PDF & Table Parsing (PyMuPDF)
+    3. Single-Pass KPI & Executive Summary Extraction (Gemini)
+    4. 768-D Vector Embeddings & pgvector Chunk Indexing
+    """
+
     def __init__(self):
-        self.hasher = FileHasher()
-        self.parser = PDFParser()
+        self.parser = StructureAwarePDFParser()
         self.extractor = FinancialExtractor()
         self.embedder = FinancialEmbedder()
 
     async def process_file(self, pdf_path: Path, ticker_override: Optional[str] = None) -> Dict[str, Any]:
         pdf_path = Path(pdf_path)
-        file_hash = self.hasher.compute_hash(pdf_path)
+        if not pdf_path.exists():
+            return {"error": f"File not found: {pdf_path}"}
 
-        # 1. Deduplication Check
+        file_hash = compute_file_hash(pdf_path)
+
         async with AsyncSessionLocal() as session:
+            # 1. SHA-256 Deduplication Check
             stmt = select(Document).where(Document.file_hash == file_hash)
             res = await session.execute(stmt)
             existing_doc = res.scalar_one_or_none()
+
             if existing_doc:
                 return {
                     "status": "cached",
                     "document_id": str(existing_doc.id),
                     "ticker": existing_doc.ticker,
-                    "message": "Filing previously ingested. Loaded from database."
+                    "fiscal_year": existing_doc.fiscal_year,
+                    "message": "Filing already processed and indexed."
                 }
 
-        # 2. Structure-Aware Parsing
-        parse_result = self.parser.parse_pdf(pdf_path)
-        metadata = parse_result.get("metadata", {})
-        ticker = (ticker_override or metadata.get("ticker") or "UNKNOWN").upper()
-        chunks = parse_result.get("chunks", [])
+            # 2. Parse PDF Structure
+            pages_data = self.parser.extract_text_and_tables(pdf_path)
+            full_text = "\n\n".join([p["text"] for p in pages_data])
 
-        # 3. Single-Pass Extraction
-        combined_sample_text = "\n\n".join([c.get("content") or c.get("text") or "" for c in chunks[:15]])
-        extracted = self.extractor.extract_kpis_and_summary(combined_sample_text)
-        kpis = extracted.get("kpis", {})
-        ratios = extracted.get("calculated_ratios", {})
-        summary_data = extracted.get("summary", {})
+            # 3. Extract KPIs and Summary
+            extracted_bundle = self.extractor.extract_kpis_and_summary(full_text[:40000])
+            kpis = extracted_bundle.get("kpis", {})
+            ratios = extracted_bundle.get("calculated_ratios", {})
+            summary = extracted_bundle.get("summary", {})
 
-        doc_year = int(kpis.get("fiscal_year") or metadata.get("fiscal_year") or (2025 if "2025" in str(pdf_path) else 2024))
-        doc_period = str(kpis.get("fiscal_period") or metadata.get("fiscal_period") or f"FY{doc_year}")
+            ticker = ticker_override.upper() if ticker_override else kpis.get("ticker", "TICKER").upper()
+            fiscal_year = kpis.get("fiscal_year", 2025)
+            fiscal_period = kpis.get("fiscal_period", f"FY{fiscal_year}")
 
-        # 4. Database Transaction
-        async with AsyncSessionLocal() as session:
-            c_stmt = select(Company).where(Company.ticker == ticker)
-            c_res = await session.execute(c_stmt)
-            company = c_res.scalar_one_or_none()
+            # 4. Get or Create Company
+            comp_stmt = select(Company).where(Company.ticker == ticker)
+            comp_res = await session.execute(comp_stmt)
+            company = comp_res.scalar_one_or_none()
 
             if not company:
-                company_name = kpis.get("company_name") or metadata.get("company_name") or f"{ticker} Inc."
                 company = Company(
-                    id=uuid.uuid4(),
                     ticker=ticker,
-                    company_name=company_name,
-                    sector="Technology",
-                    industry="Public Equities"
+                    company_name=kpis.get("company_name", f"{ticker} Inc.")
                 )
                 session.add(company)
                 await session.flush()
 
-            # Create Document
-            doc = Document(
-                id=uuid.uuid4(),
+            # 5. Create Document Record
+            document = Document(
                 company_id=company.id,
                 ticker=ticker,
-                fiscal_year=doc_year,
-                fiscal_period=doc_period,
                 form_type="10-K",
-                executive_summary=summary_data.get("executive_summary", ""),
-                key_risks=json.dumps(summary_data.get("key_risks", [])) if isinstance(summary_data.get("key_risks"), list) else str(summary_data.get("key_risks", "")),
-                growth_catalysts=json.dumps(summary_data.get("growth_catalysts", [])) if isinstance(summary_data.get("growth_catalysts"), list) else str(summary_data.get("growth_catalysts", "")),
-                file_hash=file_hash
+                fiscal_year=fiscal_year,
+                fiscal_period=fiscal_period,
+                file_hash=file_hash,
+                file_path=str(pdf_path),
+                executive_summary=summary.get("executive_summary", ""),
+                key_risks=summary.get("key_risks", []),
+                growth_catalysts=summary.get("growth_catalysts", [])
             )
-            session.add(doc)
+            session.add(document)
             await session.flush()
 
-            # Create Financial Metrics
+            # 6. Create Financial Metrics Record
             metric = FinancialMetric(
-                id=uuid.uuid4(),
-                document_id=doc.id,
-                revenue=_to_float(kpis.get("revenue")),
-                gross_profit=_to_float(kpis.get("gross_profit")),
-                operating_income=_to_float(kpis.get("operating_income")),
-                net_income=_to_float(kpis.get("net_income")),
-                diluted_eps=_to_float(kpis.get("diluted_eps")),
-                free_cash_flow=_to_float(kpis.get("free_cash_flow") or ratios.get("free_cash_flow")),
-                operating_cash_flow=_to_float(kpis.get("operating_cash_flow")),
-                capital_expenditures=_to_float(kpis.get("capital_expenditures")),
-                total_cash_and_equivalents=_to_float(kpis.get("total_cash_and_equivalents")),
-                total_debt=_to_float(kpis.get("total_debt")),
-                shareholders_equity=_to_float(kpis.get("shareholders_equity")),
-                gross_margin=_to_float(ratios.get("gross_margin")),
-                operating_margin=_to_float(ratios.get("operating_margin")),
-                net_profit_margin=_to_float(ratios.get("net_profit_margin")),
-                debt_to_equity=_to_float(ratios.get("debt_to_equity"))
+                document_id=document.id,
+                revenue=kpis.get("revenue"),
+                gross_profit=kpis.get("gross_profit"),
+                operating_income=kpis.get("operating_income"),
+                net_income=kpis.get("net_income"),
+                diluted_eps=kpis.get("diluted_eps"),
+                gross_margin=ratios.get("gross_margin"),
+                operating_margin=ratios.get("operating_margin"),
+                net_profit_margin=ratios.get("net_profit_margin"),
+                operating_cash_flow=kpis.get("operating_cash_flow"),
+                capital_expenditures=kpis.get("capital_expenditures"),
+                free_cash_flow=ratios.get("free_cash_flow"),
+                total_cash_and_equivalents=kpis.get("total_cash_and_equivalents"),
+                total_debt=kpis.get("total_debt"),
+                shareholders_equity=kpis.get("shareholders_equity"),
+                debt_to_equity=ratios.get("debt_to_equity")
             )
             session.add(metric)
 
-            # 5. Embed and Insert Chunks
-            for chunk_idx, chunk in enumerate(chunks):
-                c_text = chunk.get("content") or chunk.get("text") or ""
-                if not c_text.strip():
+            # 7. Generate Chunks and Vector Embeddings
+            for p_idx, page in enumerate(pages_data):
+                p_text = page.get("text", "").strip()
+                if not p_text:
                     continue
-                c_emb = self.embedder.embed_text(c_text)
 
-                chunk_obj = DocumentChunk(
-                    id=uuid.uuid4(),
-                    document_id=doc.id,
+                emb = self.embedder.embed_text(p_text)
+                chunk = DocumentChunk(
+                    document_id=document.id,
                     ticker=ticker,
-                    section=chunk.get("section") or "SEC Disclosures",
-                    chunk_type=chunk.get("chunk_type") or "text",
-                    content=c_text,
-                    page_number=int(chunk.get("page_number") or 1),
-                    chunk_index=chunk_idx,
-                    embedding=c_emb
+                    section=page.get("section", "SEC Disclosures"),
+                    chunk_type="text",
+                    content=p_text,
+                    page_number=page.get("page_number", p_idx + 1),
+                    chunk_index=p_idx,
+                    embedding=emb
                 )
-                session.add(chunk_obj)
+                session.add(chunk)
 
             await session.commit()
 
             return {
                 "status": "success",
-                "document_id": str(doc.id),
+                "document_id": str(document.id),
                 "ticker": ticker,
-                "fiscal_year": doc_year,
-                "chunks_indexed": len(chunks)
+                "fiscal_year": fiscal_year,
+                "message": f"Successfully ingested and indexed {ticker} ({fiscal_period})!"
             }

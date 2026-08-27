@@ -4,6 +4,7 @@ uvicorn>=0.28.0
 sqlalchemy>=2.0.25
 asyncpg>=0.29.0
 psycopg2-binary>=2.9.9
+greenlet>=3.0.0
 pgvector>=0.2.5
 pymupdf>=1.23.0
 pdfplumber>=0.10.0
