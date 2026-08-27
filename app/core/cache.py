@@ -1,28 +1,39 @@
 import math
 import time
 import json
+import re
 import logging
 from typing import Dict, Any, Optional, List, Tuple
 from app.rag.embedder import FinancialEmbedder
 
 logger = logging.getLogger(__name__)
 
+def extract_year_from_query(query: str) -> Optional[int]:
+    matches = re.findall(r'\b(201\d|202\d|fy201\d|fy202\d|fy1\d|fy2\d)\b', query.lower())
+    if matches:
+        raw = matches[0].replace("fy", "")
+        if len(raw) == 2:
+            return int("20" + raw)
+        elif len(raw) == 4:
+            return int(raw)
+    return None
+
 class SemanticCacheEntry:
-    def __init__(self, query: str, ticker: str, embedding: List[float], payload: Dict[str, Any], timestamp: float):
+    def __init__(self, query: str, ticker: str, target_year: Optional[int], embedding: List[float], payload: Dict[str, Any], timestamp: float):
         self.query = query
         self.ticker = ticker
+        self.target_year = target_year
         self.embedding = embedding
         self.payload = payload
         self.timestamp = timestamp
 
 class FinancialSemanticCache:
     """
-    High-Speed Production Semantic Vector Caching Layer:
-    1. Tier 0 (Exact Match Hash Cache): 0.1ms latency (No Embedding API call needed).
-    2. Tier 1 (Semantic Vector Cosine Similarity): 0.86 threshold for financial paraphrases.
+    Year-Aware Production Semantic Vector Caching Layer:
+    Guarantees zero collisions between different fiscal years or between general and year-specific queries.
     """
 
-    def __init__(self, similarity_threshold: float = 0.86, ttl_seconds: int = 86400):
+    def __init__(self, similarity_threshold: float = 0.88, ttl_seconds: int = 86400):
         self.threshold = similarity_threshold
         self.ttl = ttl_seconds
         self.embedder = FinancialEmbedder()
@@ -30,8 +41,8 @@ class FinancialSemanticCache:
         self._vector_cache: List[SemanticCacheEntry] = []
         self._stats = {"hits": 0, "misses": 0, "exact_hits": 0, "semantic_hits": 0}
 
-    def _clean_key(self, query: str, ticker: str) -> str:
-        return f"{(ticker or 'ALL').upper()}:::{query.strip().lower()}"
+    def _clean_key(self, query: str, ticker: str, year: Optional[int]) -> str:
+        return f"{(ticker or 'ALL').upper()}:::{year}:::{query.strip().lower()}"
 
     def _cosine_similarity(self, vec_a: List[float], vec_b: List[float]) -> float:
         if not vec_a or not vec_b or len(vec_a) != len(vec_b):
@@ -47,9 +58,10 @@ class FinancialSemanticCache:
 
         clean_ticker = (ticker or "ALL").upper()
         now = time.time()
-        exact_k = self._clean_key(query, clean_ticker)
+        query_year = extract_year_from_query(query)
+        exact_k = self._clean_key(query, clean_ticker, query_year)
 
-        # Tier 0: Instant Exact Match (O(1) Hash Map — 0.1 ms, 0 API calls)
+        # Tier 0: Exact Match
         if exact_k in self._exact_cache:
             entry = self._exact_cache[exact_k]
             if (now - entry.timestamp) < self.ttl:
@@ -59,31 +71,28 @@ class FinancialSemanticCache:
                 cached_res["cached"] = True
                 cached_res["cache_type"] = "EXACT_HASH_HIT"
                 cached_res["cache_similarity"] = 1.0
-                cached_res["original_cached_query"] = entry.query
                 return cached_res, 1.0
             else:
                 del self._exact_cache[exact_k]
 
-        # Evict expired vector entries
         self._vector_cache = [e for e in self._vector_cache if (now - e.timestamp) < self.ttl]
 
         if not self._vector_cache:
             self._stats["misses"] += 1
             return None
 
-        # Filter candidates by ticker scope
+        # Filter strictly by matching ticker AND matching target year
         candidate_entries = [
             e for e in self._vector_cache 
-            if e.ticker == clean_ticker or clean_ticker in ["ALL", "PORTFOLIO"] or e.ticker in ["ALL", "PORTFOLIO"]
+            if (e.ticker == clean_ticker or clean_ticker in ["ALL", "PORTFOLIO"] or e.ticker in ["ALL", "PORTFOLIO"])
+            and e.target_year == query_year
         ]
 
         if not candidate_entries:
             self._stats["misses"] += 1
             return None
 
-        # Tier 1: Semantic Vector Matching
         query_emb = self.embedder.embed_query(query)
-
         best_entry = None
         best_sim = -1.0
 
@@ -100,7 +109,6 @@ class FinancialSemanticCache:
             cached_res["cached"] = True
             cached_res["cache_type"] = "SEMANTIC_VECTOR_HIT"
             cached_res["cache_similarity"] = round(best_sim, 4)
-            cached_res["original_cached_query"] = best_entry.query
             return cached_res, best_sim
 
         self._stats["misses"] += 1
@@ -111,18 +119,20 @@ class FinancialSemanticCache:
             return
 
         clean_ticker = (ticker or "ALL").upper()
-        now = time.time()
+        query_year = extract_year_from_query(query)
         query_emb = self.embedder.embed_query(query)
-        
+        now = time.time()
+
         entry = SemanticCacheEntry(
             query=query.strip(),
             ticker=clean_ticker,
+            target_year=query_year,
             embedding=query_emb,
             payload=payload,
             timestamp=now
         )
-        
-        exact_k = self._clean_key(query, clean_ticker)
+
+        exact_k = self._clean_key(query, clean_ticker, query_year)
         self._exact_cache[exact_k] = entry
         self._vector_cache.append(entry)
 

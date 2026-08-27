@@ -7,12 +7,16 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-# 1. Async Database Engine (NullPool for thread-safe asynchronous operations)
-raw_async_url = settings.NEON_DB_ASYNC_URL or settings.DATABASE_URL
+# 1. Async Database Engine (asyncpg requires '?ssl=require' NOT '?sslmode=require')
+raw_async_url = settings.NEON_DB_ASYNC_URL or settings.DATABASE_URL or ""
 if raw_async_url.startswith("postgres://"):
     raw_async_url = raw_async_url.replace("postgres://", "postgresql+asyncpg://", 1)
 elif raw_async_url.startswith("postgresql://") and not raw_async_url.startswith("postgresql+asyncpg://"):
     raw_async_url = raw_async_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+# Clean asyncpg query parameters: replace sslmode with ssl
+if "sslmode=" in raw_async_url:
+    raw_async_url = raw_async_url.replace("sslmode=", "ssl=")
 
 async_engine = create_async_engine(
     raw_async_url,
@@ -26,12 +30,17 @@ AsyncSessionLocal = async_sessionmaker(
     expire_on_commit=False
 )
 
-# 2. Synchronous Database Engine (for Streamlit thread-safe reads)
-raw_sync_url = settings.NEON_DB_SYNC_URL or settings.SYNC_DATABASE_URL or settings.DATABASE_URL
+# 2. Synchronous Database Engine (psycopg2 requires '?sslmode=require')
+raw_sync_url = settings.NEON_DB_SYNC_URL or settings.SYNC_DATABASE_URL or settings.DATABASE_URL or ""
 if raw_sync_url.startswith("postgresql+asyncpg://"):
     raw_sync_url = raw_sync_url.replace("postgresql+asyncpg://", "postgresql://", 1)
 elif raw_sync_url.startswith("postgres://"):
     raw_sync_url = raw_sync_url.replace("postgres://", "postgresql://", 1)
+
+if "?ssl=require" in raw_sync_url:
+    raw_sync_url = raw_sync_url.replace("?ssl=require", "?sslmode=require")
+elif "&ssl=require" in raw_sync_url:
+    raw_sync_url = raw_sync_url.replace("&ssl=require", "&sslmode=require")
 
 sync_engine = create_engine(
     raw_sync_url,
