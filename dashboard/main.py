@@ -9,7 +9,6 @@ import sys
 import json
 from pathlib import Path
 
-# Add project root to sys.path
 root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
@@ -22,7 +21,6 @@ from app.core.database import SyncSessionLocal
 from app.models.domain import Company, Document, FinancialMetric
 from sqlalchemy import select, and_
 
-# Configure Page Layout & Title
 st.set_page_config(
     page_title="Financial RAG & Equity Intelligence Platform",
     page_icon="💎",
@@ -30,7 +28,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom Institutional Dark Theme CSS
 st.markdown("""
 <style>
     html {
@@ -98,9 +95,15 @@ def get_all_companies_annual_data():
             join(Document, Company.id == Document.company_id).\
             join(FinancialMetric, Document.id == FinancialMetric.document_id).\
             where(Document.form_type == "10-K").\
-            order_by(Company.ticker, Document.fiscal_year.desc())
+            order_by(Company.ticker, Document.fiscal_year.desc(), Document.created_at.desc())
         res = session.execute(stmt).all()
-        return res
+        
+        unique_map = {}
+        for comp, doc, met in res:
+            key = (comp.ticker, doc.fiscal_year)
+            if key not in unique_map:
+                unique_map[key] = (comp, doc, met)
+        return list(unique_map.values())
 
 def get_company_annual_history(ticker):
     with SyncSessionLocal() as session:
@@ -108,14 +111,15 @@ def get_company_annual_history(ticker):
             join(Document, Company.id == Document.company_id).\
             join(FinancialMetric, Document.id == FinancialMetric.document_id).\
             where(and_(Document.ticker == ticker, Document.form_type == "10-K")).\
-            order_by(Document.fiscal_year.asc())
+            order_by(Document.fiscal_year.asc(), Document.created_at.desc())
         res = session.execute(stmt).all()
         
         year_dict = {}
         company_name = f"{ticker} Inc."
         for comp, doc, met in res:
             company_name = comp.company_name
-            year_dict[doc.fiscal_year] = (doc, met)
+            if doc.fiscal_year not in year_dict:
+                year_dict[doc.fiscal_year] = (doc, met)
             
         sorted_years = sorted(year_dict.keys())
         filings_list = [year_dict[y] for y in sorted_years]
@@ -124,7 +128,6 @@ def get_company_annual_history(ticker):
 all_filings_data = get_all_companies_annual_data()
 ticker_set = sorted(list(set([comp.ticker for comp, doc, met in all_filings_data]))) if all_filings_data else []
 
-# ----------------- SIDEBAR: NAVIGATION & INGESTION -----------------
 with st.sidebar:
     st.title("🏦 Financial RAG")
     st.caption("AI-Powered SEC 10-K Equity Research Platform")
@@ -132,21 +135,8 @@ with st.sidebar:
 
     view_mode = st.radio("Navigation View", ["📊 Portfolio Benchmark (Landing Page)", "🔍 Company Deep-Dive (Intelligence Studio)"])
 
-    # 1-Click Recruiter Demo Showcase
     st.markdown("---")
-    st.subheader("⚡ Quick Showcase")
-    st.caption("1-Click demo pre-populating blue-chip institutional equities.")
-    if st.button("🚀 Load Blue-Chip Showcase (AAPL, MSFT, NVDA, TSLA, PLTR)", use_container_width=True):
-        sec_fetcher = SECFilingFetcher()
-        demo_tickers = ["AAPL", "MSFT", "NVDA", "TSLA", "PLTR"]
-        with st.spinner("Provisioning demo portfolio metrics..."):
-            for dt in demo_tickers:
-                run_async_safe(sec_fetcher.fetch_and_ingest_years(dt, [2024, 2025]))
-            st.success("✅ Demo portfolio loaded successfully!")
-            st.rerun()
-
-    st.markdown("---")
-    st.subheader("🔍 Ingest Any SEC Company (10-K)")
+    st.subheader("⚡ Ingest SEC 10-K Company")
     st.caption("Search across 10,000+ US public equities")
     
     search_query = st.text_input("🔍 Company Name or Ticker", value="", placeholder="Type e.g. Apple, Microsoft, Tesla...").strip()
@@ -190,16 +180,12 @@ with st.sidebar:
     st.caption("Active Database: Neon Serverless PostgreSQL (pgvector)")
     st.caption("LLM Engine: Google Gemini 3.6 Flash")
 
-
-# =========================================================================
-# VIEW 1: PORTFOLIO BENCHMARK & COMPARISON (LANDING PAGE)
-# =========================================================================
 if view_mode == "📊 Portfolio Benchmark (Landing Page)":
     st.title("🏛️ Multi-Company Equity Benchmark Matrix")
     st.caption("Side-by-side annual 10-K performance comparison across ingested public companies.")
 
     if not all_filings_data:
-        st.info("No companies ingested yet. Use the sidebar to search and ingest companies, or click 'Load Blue-Chip Showcase'.")
+        st.info("No companies ingested yet. Use the search box in the sidebar to ingest your first company.")
     else:
         companies_name_map = {}
         for comp, doc, met in all_filings_data:
@@ -222,7 +208,7 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
         ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1.6, 1.2, 1.2])
         with ctrl_col1:
             time_preset = st.selectbox(
-                "⏱️ Table Time Horizon Preset:",
+                "⏱️ Time Horizon Preset:",
                 [
                     "All Ingested Years (Complete History)",
                     "Last 5 Years (2021–2025)",
@@ -253,20 +239,26 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
         with ctrl_col3:
             chart_view_type = st.selectbox("📊 Chart Style", ["Horizontal Bars (Scales to 50+)", "2D Scatter Matrix (Bubble Chart)"])
 
-        # Filter records for table
         records = []
+        seen_keys = set()
+
         for comp, doc, met in all_filings_data:
             if comp.ticker in selected_companies and doc.fiscal_year in active_years:
+                dedup_key = (comp.ticker, doc.fiscal_year)
+                if dedup_key in seen_keys:
+                    continue
+                seen_keys.add(dedup_key)
+
                 fy_str = f"FY{doc.fiscal_year}"
                 label_with_year = f"{comp.ticker} ({fy_str})"
                 
-                rev_m = met.revenue or 0
-                gp_m = met.gross_profit or 0
-                op_m = met.operating_income or 0
-                net_m = met.net_income or 0
-                fcf_m = met.free_cash_flow or 0
-                debt_m = met.total_debt or 0
-                cash_m = met.total_cash_and_equivalents or 0
+                rev_m = met.revenue or 0.0
+                gp_m = met.gross_profit or 0.0
+                op_m = met.operating_income or 0.0
+                net_m = met.net_income or 0.0
+                fcf_m = met.free_cash_flow or 0.0
+                debt_m = met.total_debt or 0.0
+                cash_m = met.total_cash_and_equivalents or 0.0
 
                 records.append({
                     "Ticker": comp.ticker,
@@ -299,6 +291,8 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
         if df_filtered.empty:
             st.warning("No records match the current company and year selection.")
         else:
+            df_filtered = df_filtered.sort_values(by=["Ticker", "Year"], ascending=[True, True])
+
             if top_n_filter == "Top 5 by Revenue":
                 df_filtered = df_filtered.sort_values(by="Revenue ($M)", ascending=False).head(5)
             elif top_n_filter == "Top 10 by Revenue":
@@ -306,7 +300,6 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
             elif top_n_filter == "Top 10 by Op. Margin":
                 df_filtered = df_filtered.sort_values(by="Op. Margin Raw", ascending=False).head(10)
 
-            # Summary Table
             st.subheader(f"📌 Peer Benchmark Matrix ({len(selected_companies)} Companies, {len(active_years)} Fiscal Years)")
             st.dataframe(
                 df_filtered[[
@@ -318,105 +311,88 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
             )
 
             st.markdown("---")
-            
-            # --- DEDICATED MULTI-YEAR CHART FILTER ---
-            st.subheader("📊 Comparative Financial Visualizations")
-            
-            # Multi-Year Chart Filter
-            chart_year_options = sorted(list(set(df_filtered["Year"].tolist())), reverse=True)
-            selected_chart_years = st.multiselect(
-                "📅 Filter Fiscal Years for Chart Visualization (Select one or multiple years):",
-                options=chart_year_options,
-                default=chart_year_options,
-                help="Choose which years appear in the comparative charts below."
-            )
+            st.subheader("📊 Comparative Financial Widgets")
 
-            df_chart_data = df_filtered[df_filtered["Year"].isin(selected_chart_years)] if selected_chart_years else df_filtered
+            if chart_view_type == "2D Scatter Matrix (Bubble Chart)":
+                st.caption("💡 X-Axis: Revenue Scale ($M) | Y-Axis: Operating Margin (%) | Bubble Size: Free Cash Flow ($M) | Color: Net Profit Margin (%)")
+                fig_scatter = px.scatter(
+                    df_filtered,
+                    x="Revenue ($M)",
+                    y="Op. Margin Raw",
+                    size=df_filtered["Free Cash Flow ($M)"].apply(lambda v: max(float(v), 50.0)),
+                    color="Net Margin Raw",
+                    hover_name="Label",
+                    text="Label",
+                    color_continuous_scale="Viridis",
+                    template="plotly_dark",
+                    height=550
+                )
+                fig_scatter.update_traces(textposition="top center")
+                st.plotly_chart(fig_scatter, use_container_width=True)
 
-            if df_chart_data.empty:
-                st.info("Please select at least one fiscal year for the charts.")
             else:
-                if chart_view_type == "2D Scatter Matrix (Bubble Chart)":
-                    st.caption("💡 X-Axis: Revenue Scale ($M) | Y-Axis: Operating Margin (%) | Bubble Size: Free Cash Flow ($M) | Color: Net Profit Margin (%)")
-                    fig_scatter = px.scatter(
-                        df_chart_data,
-                        x="Revenue ($M)",
-                        y="Op. Margin Raw",
-                        size=df_chart_data["Free Cash Flow ($M)"].apply(lambda v: max(float(v), 50.0)),
-                        color="Net Margin Raw",
-                        hover_name="Label",
-                        text="Label",
+                dynamic_height = max(380, len(df_filtered) * 48)
+
+                col_w1, col_w2 = st.columns(2)
+                with col_w1:
+                    fig_h_rev = px.bar(
+                        df_filtered,
+                        y="Label",
+                        x=["Revenue ($M)", "Net Income ($M)"],
+                        barmode="group",
+                        orientation="h",
+                        title="Annual Revenue vs. Net Income ($ Millions)",
+                        color_discrete_sequence=["#4a86e8", "#00c853"],
+                        template="plotly_dark",
+                        height=dynamic_height
+                    )
+                    st.plotly_chart(fig_h_rev, use_container_width=True)
+
+                with col_w2:
+                    fig_h_mar = px.bar(
+                        df_filtered,
+                        y="Label",
+                        x=["Gross Margin Raw", "Op. Margin Raw", "Net Margin Raw"],
+                        barmode="group",
+                        orientation="h",
+                        title="Margin Durability (% Breakdown)",
+                        color_discrete_sequence=["#ff9800", "#9c27b0", "#00e676"],
+                        template="plotly_dark",
+                        height=dynamic_height
+                    )
+                    st.plotly_chart(fig_h_mar, use_container_width=True)
+
+                col_w3, col_w4 = st.columns(2)
+                with col_w3:
+                    fig_h_fcf = px.bar(
+                        df_filtered,
+                        y="Label",
+                        x=["Free Cash Flow ($M)", "Total Debt ($M)"],
+                        barmode="group",
+                        orientation="h",
+                        title="Free Cash Flow vs. Total Debt ($ Millions)",
+                        color_discrete_sequence=["#00b0ff", "#ff5252"],
+                        template="plotly_dark",
+                        height=dynamic_height
+                    )
+                    st.plotly_chart(fig_h_fcf, use_container_width=True)
+
+                with col_w4:
+                    fig_h_de = px.bar(
+                        df_filtered,
+                        y="Label",
+                        x="Debt-to-Equity (x)",
+                        orientation="h",
+                        title="Debt-to-Equity Leverage (x)",
+                        color="Debt-to-Equity (x)",
                         color_continuous_scale="Viridis",
                         template="plotly_dark",
-                        height=550
+                        height=dynamic_height
                     )
-                    fig_scatter.update_traces(textposition="top center")
-                    st.plotly_chart(fig_scatter, use_container_width=True)
-
-                else:
-                    dynamic_height = max(380, len(df_chart_data) * 42)
-
-                    col_w1, col_w2 = st.columns(2)
-                    with col_w1:
-                        fig_h_rev = px.bar(
-                            df_chart_data.sort_values(by="Revenue ($M)", ascending=True),
-                            y="Label",
-                            x=["Revenue ($M)", "Net Income ($M)"],
-                            barmode="group",
-                            orientation="h",
-                            title="Annual Revenue vs. Net Income ($ Millions)",
-                            color_discrete_sequence=["#4a86e8", "#00c853"],
-                            template="plotly_dark",
-                            height=dynamic_height
-                        )
-                        st.plotly_chart(fig_h_rev, use_container_width=True)
-
-                    with col_w2:
-                        fig_h_mar = px.bar(
-                            df_chart_data.sort_values(by="Op. Margin Raw", ascending=True),
-                            y="Label",
-                            x=["Gross Margin Raw", "Op. Margin Raw", "Net Margin Raw"],
-                            barmode="group",
-                            orientation="h",
-                            title="Margin Durability (% Breakdown)",
-                            color_discrete_sequence=["#ff9800", "#9c27b0", "#00e676"],
-                            template="plotly_dark",
-                            height=dynamic_height
-                        )
-                        st.plotly_chart(fig_h_mar, use_container_width=True)
-
-                    col_w3, col_w4 = st.columns(2)
-                    with col_w3:
-                        fig_h_fcf = px.bar(
-                            df_chart_data.sort_values(by="Free Cash Flow ($M)", ascending=True),
-                            y="Label",
-                            x=["Free Cash Flow ($M)", "Total Debt ($M)"],
-                            barmode="group",
-                            orientation="h",
-                            title="Free Cash Flow vs. Total Debt ($ Millions)",
-                            color_discrete_sequence=["#00b0ff", "#ff5252"],
-                            template="plotly_dark",
-                            height=dynamic_height
-                        )
-                        st.plotly_chart(fig_h_fcf, use_container_width=True)
-
-                    with col_w4:
-                        fig_h_de = px.bar(
-                            df_chart_data.sort_values(by="Debt-to-Equity (x)", ascending=True),
-                            y="Label",
-                            x="Debt-to-Equity (x)",
-                            orientation="h",
-                            title="Debt-to-Equity Leverage (x)",
-                            color="Debt-to-Equity (x)",
-                            color_continuous_scale="Viridis",
-                            template="plotly_dark",
-                            height=dynamic_height
-                        )
-                        st.plotly_chart(fig_h_de, use_container_width=True)
+                    st.plotly_chart(fig_h_de, use_container_width=True)
 
         st.markdown("---")
 
-        # Global Portfolio Copilot
         st.subheader("💬 Portfolio Financial Copilot (Cross-Company Q&A)")
         st.caption("Ask comparative questions across all ingested annual 10-K reports.")
 
@@ -435,10 +411,10 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
                                 st.caption(cit["content_snippet"])
 
         with st.form(key="port_chat_form", clear_on_submit=True):
-            p_cols = st.columns([5, 1])
+            p_cols = st.columns()
             with p_cols[0]:
                 portfolio_prompt = st.text_input("Ask a cross-company question...", label_visibility="collapsed", placeholder="Type a comparative question across all companies...")
-            with p_cols[1]:
+            with p_cols:
                 submit_port = st.form_submit_button("Send 💬", use_container_width=True)
 
             if submit_port and portfolio_prompt:
@@ -464,9 +440,6 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
                             })
                 st.rerun()
 
-# =========================================================================
-# VIEW 2: COMPANY DEEP-DIVE (PREMIUM INTELLIGENCE STUDIO)
-# =========================================================================
 else:
     selected_ticker = st.selectbox("📌 Select Target Company", options=ticker_set, index=0)
     company_name_resolved, company_filings = get_company_annual_history(selected_ticker)
@@ -478,13 +451,13 @@ else:
     for doc_item, met_item in company_filings:
         fy_str = f"FY{doc_item.fiscal_year}"
         
-        rev_m = met_item.revenue or 0
-        gp_m = met_item.gross_profit or 0
-        op_m = met_item.operating_income or 0
-        net_m = met_item.net_income or 0
-        fcf_m = met_item.free_cash_flow or 0
-        debt_m = met_item.total_debt or 0
-        cash_m = met_item.total_cash_and_equivalents or 0
+        rev_m = met_item.revenue or 0.0
+        gp_m = met_item.gross_profit or 0.0
+        op_m = met_item.operating_income or 0.0
+        net_m = met_item.net_income or 0.0
+        fcf_m = met_item.free_cash_flow or 0.0
+        debt_m = met_item.total_debt or 0.0
+        cash_m = met_item.total_cash_and_equivalents or 0.0
 
         timeline_records.append({
             "Fiscal Year": fy_str,
@@ -511,13 +484,11 @@ else:
 
     df_multiyear = pd.DataFrame(timeline_records)
 
-    # 1. Sleek Header Banner
     year_range_str = f"{df_multiyear['Fiscal Year'].iloc[0]} – {df_multiyear['Fiscal Year'].iloc[-1]}" if not df_multiyear.empty else "FY2025"
 
     st.markdown(f"## 💎 {selected_ticker} — {company_name_resolved}")
     st.caption(f"Comprehensive SEC Form 10-K Equity Research & Analytics ({year_range_str})")
 
-    # 2. Executive Fundamental Scorecard (6 Cards with Clear Formatted Values)
     if latest_metric:
         st.markdown(f"#### 📊 Latest Fiscal Position (FY{latest_doc.fiscal_year})")
         kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
@@ -536,7 +507,6 @@ else:
 
     st.markdown("---")
 
-    # 3. Clean Multi-Year Annual Statement Table
     if not df_multiyear.empty:
         st.subheader("📅 Multi-Year Annual Financial Model Trajectory")
         st.dataframe(
@@ -548,7 +518,6 @@ else:
             use_container_width=True
         )
 
-    # 4. AI Strategic Overview Drawer
     if latest_doc and latest_doc.executive_summary:
         with st.expander(f"🤖 View AI Strategic Synthesis & Risk Factors (FY{latest_doc.fiscal_year})", expanded=False):
             st.write(latest_doc.executive_summary)
@@ -572,7 +541,6 @@ else:
 
     st.markdown("---")
 
-    # 5. SIDE-BY-SIDE SPLIT VIEW: Interactive Studio (Left) vs. Annual Copilot (Right)
     left_col, right_col = st.columns([1.1, 0.9])
 
     with left_col:
@@ -650,67 +618,46 @@ else:
 
         with tab_growth:
             if not df_multiyear.empty:
-                growth_year_options = sorted(list(set(df_multiyear["Year"].tolist())))
-                selected_growth_years = st.multiselect(
-                    "📅 Filter Years for Growth Charts:",
-                    options=growth_year_options,
-                    default=growth_year_options,
-                    key=f"growth_years_{selected_ticker}"
-                )
-                
-                df_growth_chart = df_multiyear[df_multiyear["Year"].isin(selected_growth_years)] if selected_growth_years else df_multiyear
-
                 fig_t_rev = px.bar(
-                    df_growth_chart,
+                    df_multiyear,
                     x="Fiscal Year",
                     y=["Revenue ($M)", "Net Income ($M)"],
                     barmode="group",
-                    title=f"{selected_ticker} Revenue & Net Income ($M)",
+                    title=f"{selected_ticker} Multi-Year Revenue & Net Income ($M)",
                     color_discrete_sequence=["#4a86e8", "#00c853"],
                     template="plotly_dark",
-                    height=440
+                    height=460
                 )
                 st.plotly_chart(fig_t_rev, use_container_width=True)
 
                 fig_t_mar = px.line(
-                    df_growth_chart,
+                    df_multiyear,
                     x="Fiscal Year",
                     y=["Gross Margin Raw", "Op. Margin Raw"],
                     markers=True,
-                    title=f"{selected_ticker} Margin Evolution (%)",
+                    title=f"{selected_ticker} Margin Evolution Over Time (%)",
                     color_discrete_sequence=["#ff9800", "#00e676"],
                     template="plotly_dark",
-                    height=360
+                    height=380
                 )
                 st.plotly_chart(fig_t_mar, use_container_width=True)
 
         with tab_bs:
             if not df_multiyear.empty:
-                bs_year_options = sorted(list(set(df_multiyear["Year"].tolist())))
-                selected_bs_years = st.multiselect(
-                    "📅 Filter Years for Balance Sheet Charts:",
-                    options=bs_year_options,
-                    default=bs_year_options,
-                    key=f"bs_years_{selected_ticker}"
-                )
-                
-                df_bs_chart = df_multiyear[df_multiyear["Year"].isin(selected_bs_years)] if selected_bs_years else df_multiyear
-
                 fig_t_fcf = px.bar(
-                    df_bs_chart,
+                    df_multiyear,
                     x="Fiscal Year",
                     y=["Free Cash Flow ($M)", "Total Debt ($M)"],
                     barmode="group",
                     title=f"{selected_ticker} Free Cash Flow vs. Total Debt ($M)",
                     color_discrete_sequence=["#00b0ff", "#ff5252"],
                     template="plotly_dark",
-                    height=440
+                    height=460
                 )
                 st.plotly_chart(fig_t_fcf, use_container_width=True)
 
-    # RIGHT COLUMN: Dedicated Annual Chat Studio
     with right_col:
-        col_c_hdr1, col_c_hdr2 = st.columns([3, 1])
+        col_c_hdr1, col_c_hdr2 = st.columns()
         with col_c_hdr1:
             st.subheader(f"💬 {selected_ticker} Copilot")
         with col_c_hdr2:
@@ -742,10 +689,10 @@ else:
                                 st.caption(cit["content_snippet"])
 
         with st.form(key=f"deep_chat_form_{selected_ticker}", clear_on_submit=True):
-            d_cols = st.columns([5, 1])
+            d_cols = st.columns()
             with d_cols[0]:
                 deep_prompt = st.text_input("Ask about financials...", label_visibility="collapsed", placeholder=f"Ask about {selected_ticker} annual revenue, margins, debt, risks...")
-            with d_cols[1]:
+            with d_cols:
                 submit_deep = st.form_submit_button("Send 💬", use_container_width=True)
 
             if submit_deep and deep_prompt:
