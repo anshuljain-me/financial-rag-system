@@ -1,4 +1,4 @@
-import time
+import asyncio
 import pymupdf as fitz
 from pathlib import Path
 from typing import Dict, Any, List
@@ -8,9 +8,8 @@ from app.ingestion.pipeline import IngestionPipeline
 
 class SECFilingFetcher:
     """
-    10-Year Annual SEC 10-K Filing Generator & Extractor:
-    Discovers available historical years and extracts real financial statements.
-    Supports both synchronous (Streamlit thread-safe) and asynchronous execution.
+    10-Year Annual SEC 10-K Filing Generator & Extractor.
+    Supports both async and synchronous execution.
     """
 
     def __init__(self):
@@ -18,17 +17,15 @@ class SECFilingFetcher:
 
     def get_available_years(self, ticker: str) -> List[int]:
         ticker = ticker.upper()
-        try:
-            stock = yf.Ticker(ticker)
-            inc_df = stock.income_stmt
-            discovered_years = set()
-            
-            if inc_df is not None and not inc_df.empty:
-                for col in inc_df.columns:
-                    if hasattr(col, "year"):
-                        discovered_years.add(col.year)
-        except Exception:
-            discovered_years = set()
+        stock = yf.Ticker(ticker)
+        
+        inc_df = stock.income_stmt
+        discovered_years = set()
+        
+        if inc_df is not None and not inc_df.empty:
+            for col in inc_df.columns:
+                if hasattr(col, "year"):
+                    discovered_years.add(col.year)
 
         current_year = 2025
         ten_year_range = list(range(current_year - 9, current_year + 1))
@@ -50,22 +47,15 @@ class SECFilingFetcher:
 
     def generate_annual_filing_pdf_for_year(self, ticker: str, target_dir: Path, year: int) -> Path:
         ticker = ticker.upper()
-        company_name = f"{ticker} Inc."
-        business_summary = f"{company_name} operates globally across key commercial markets."
-        inc_df = None
-        bs_df = None
-        cf_df = None
-
-        try:
-            stock = yf.Ticker(ticker)
-            info = getattr(stock, "info", {}) or {}
-            company_name = info.get("longName") or info.get("shortName") or f"{ticker} Inc."
-            business_summary = info.get("longBusinessSummary") or f"{company_name} operates globally across key commercial markets."
-            inc_df = stock.income_stmt
-            bs_df = stock.balance_sheet
-            cf_df = stock.cashflow
-        except Exception:
-            pass
+        stock = yf.Ticker(ticker)
+        
+        info = getattr(stock, "info", {}) or {}
+        company_name = info.get("longName") or info.get("shortName") or f"{ticker} Inc."
+        business_summary = info.get("longBusinessSummary") or f"{company_name} operates globally across key commercial markets."
+        
+        inc_df = stock.income_stmt
+        bs_df = stock.balance_sheet
+        cf_df = stock.cashflow
 
         matched_idx = 0
         latest_date_str = f"December 31, {year}"
@@ -148,20 +138,32 @@ class SECFilingFetcher:
         doc.close()
         return target_path
 
-    def fetch_and_ingest_years_sync(self, ticker: str, selected_years: List[int]) -> List[Dict[str, Any]]:
-        """100% Thread-Safe Synchronous Ingestion for Streamlit Cloud."""
+    async def fetch_and_ingest_years(self, ticker: str, selected_years: List[int]) -> List[Dict[str, Any]]:
         ticker = ticker.upper()
         target_dir = Path("data/sample_filings")
         results = []
 
         for idx, yr in enumerate(sorted(selected_years, reverse=True)):
             pdf_path = self.generate_annual_filing_pdf_for_year(ticker, target_dir, year=yr)
-            res = self.pipeline.process_file_sync(pdf_path, ticker_override=ticker)
+            res = await self.pipeline.process_file(pdf_path, ticker_override=ticker)
             results.append(res)
             if idx < len(selected_years) - 1:
-                time.sleep(1.0)
+                await asyncio.sleep(1.5)
 
         return results
 
-    async def fetch_and_ingest_years(self, ticker: str, selected_years: List[int]) -> List[Dict[str, Any]]:
-        return self.fetch_and_ingest_years_sync(ticker, selected_years)
+    def fetch_and_ingest_years_sync(self, ticker: str, selected_years: List[int]) -> List[Dict[str, Any]]:
+        """Synchronous wrapper for thread-safe Streamlit execution."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(self.fetch_and_ingest_years(ticker, selected_years))
+        finally:
+            loop.close()
+
+    async def fetch_and_ingest(self, ticker: str) -> Dict[str, Any]:
+        results = await self.fetch_and_ingest_years(ticker, [2025])
+        return results[0] if results else {}
+
+    def fetch_and_ingest_sync(self, ticker: str) -> Dict[str, Any]:
+        return self.fetch_and_ingest_years_sync(ticker, [2025])[0]
