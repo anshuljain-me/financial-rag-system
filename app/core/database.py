@@ -7,6 +7,9 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
+class Base(DeclarativeBase):
+    pass
+
 # 1. Async Database Engine (asyncpg requires '?ssl=require')
 raw_async_url = settings.NEON_DB_ASYNC_URL or settings.DATABASE_URL or ""
 if raw_async_url.startswith("postgres://"):
@@ -53,43 +56,17 @@ SyncSessionLocal = sessionmaker(
     autoflush=False
 )
 
-class Base(DeclarativeBase):
-    pass
-
-def auto_migrate_schema():
-    """Ensures newly added columns exist in Neon PostgreSQL without dropping data."""
-    columns_to_verify = [
-        ("documents", "file_hash", "VARCHAR(64)"),
-        ("documents", "form_type", "VARCHAR(20) DEFAULT '10-K'"),
-        ("documents", "fiscal_period", "VARCHAR(20)"),
-        ("documents", "executive_summary", "TEXT"),
-        ("documents", "key_risks", "TEXT"),
-        ("documents", "growth_catalysts", "TEXT"),
-        ("financial_metrics", "free_cash_flow", "FLOAT"),
-        ("financial_metrics", "gross_margin", "FLOAT"),
-        ("financial_metrics", "operating_margin", "FLOAT"),
-        ("financial_metrics", "net_profit_margin", "FLOAT"),
-        ("financial_metrics", "debt_to_equity", "FLOAT"),
-        ("financial_metrics", "capital_expenditures", "FLOAT"),
-        ("financial_metrics", "total_cash_and_equivalents", "FLOAT"),
-        ("financial_metrics", "total_debt", "FLOAT"),
-        ("financial_metrics", "shareholders_equity", "FLOAT")
-    ]
+def ensure_tables_exist():
+    """Synchronously initializes pgvector extension and creates all tables."""
     try:
-        with sync_engine.connect() as conn:
-            for table, col, col_type in columns_to_verify:
-                try:
-                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type};"))
-                    conn.commit()
-                except Exception:
-                    pass
-    except Exception:
+        with sync_engine.begin() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+            Base.metadata.create_all(bind=conn)
+    except Exception as e:
         pass
 
-# Run automatic non-destructive column verification on startup
-auto_migrate_schema()
-
 async def init_db():
+    """Asynchronously initializes pgvector extension and creates all tables."""
     async with async_engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
         await conn.run_sync(Base.metadata.create_all)

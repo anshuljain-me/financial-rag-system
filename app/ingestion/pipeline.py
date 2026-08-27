@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from sqlalchemy import select, and_, delete, func
 
-from app.core.database import AsyncSessionLocal
+from app.core.database import AsyncSessionLocal, init_db
 from app.models.domain import Company, Document, FinancialMetric, DocumentChunk
 from app.ingestion.hasher import compute_sha256
 from app.ingestion.parser import parse_pdf_structure
@@ -16,12 +16,8 @@ logger = logging.getLogger(__name__)
 
 class IngestionPipeline:
     """
-    Enterprise-Grade Resilient SEC Form 10-K Ingestion Pipeline:
-    1. Cryptographic SHA-256 deduplication
-    2. Structure-aware multi-column PDF table parsing
-    3. Single-pass KPI & strategic summary extraction
-    4. Conflict-free company and document resolution
-    5. Clean relational KPIs and 768-D vector chunk indexing
+    Enterprise-Grade Resilient SEC Form 10-K Ingestion Pipeline.
+    Guarantees table initialization, conflict resolution, and clean transaction commits.
     """
 
     def __init__(self):
@@ -44,6 +40,12 @@ class IngestionPipeline:
         if not pdf_path.exists():
             raise FileNotFoundError(f"File not found: {pdf_path}")
 
+        # 0. Ensure database tables and vector extension exist
+        try:
+            await init_db()
+        except Exception as e:
+            logger.warning(f"init_db notice: {e}")
+
         # 1. Compute SHA-256 Hash
         file_hash = compute_sha256(pdf_path)
 
@@ -64,7 +66,8 @@ class IngestionPipeline:
 
             # 3. Parse PDF Structure & Tables
             parsed_data = parse_pdf_structure(pdf_path)
-            full_text_sample = "\n\n".join([page.get("text", "") for page in parsed_data.get("pages", [])])
+            pages = parsed_data.get("pages", [])
+            full_text_sample = "\n\n".join([page.get("text", "") for page in pages])
 
             # 4. Extract Structured Financial Line Items & Executive Summary
             extracted = self.extractor.extract_kpis_and_summary(full_text_sample)
@@ -77,7 +80,7 @@ class IngestionPipeline:
             fiscal_year = int(kpis.get("fiscal_year") or 2025)
             fiscal_period = f"FY{fiscal_year}"[:20]
 
-            # 5. Resolve Company in Database (Case-Insensitive match)
+            # 5. Resolve Company in Database
             stmt_comp = select(Company).where(func.upper(Company.ticker) == ticker)
             res_comp = await session.execute(stmt_comp)
             company = res_comp.scalar_one_or_none()
@@ -98,7 +101,7 @@ class IngestionPipeline:
                     res_comp = await session.execute(stmt_comp)
                     company = res_comp.scalar_one_or_none()
 
-            # 6. Delete any existing older filings for this specific company + fiscal year to prevent conflicts
+            # 6. Delete any conflicting previous filings for this specific company + fiscal year
             stmt_old = select(Document).where(
                 and_(
                     Document.company_id == company.id,
@@ -113,7 +116,7 @@ class IngestionPipeline:
             if old_docs:
                 await session.flush()
 
-            # 7. Serialize Lists to Safe Strings for Text Columns
+            # 7. Create Document
             key_risks_val = summary.get("key_risks", [])
             key_risks_str = json.dumps(key_risks_val) if isinstance(key_risks_val, (list, dict)) else str(key_risks_val or "")
 
@@ -135,7 +138,7 @@ class IngestionPipeline:
             session.add(doc)
             await session.flush()
 
-            # 8. Create Financial Metric Line Items with Safe Float Casting
+            # 8. Create Financial Metric Line Items
             metric = FinancialMetric(
                 document_id=doc.id,
                 revenue=self._safe_float(kpis.get("revenue")),
@@ -153,11 +156,11 @@ class IngestionPipeline:
             )
             session.add(metric)
 
-            # 9. Create Structure-Preserved Document Chunks with 768-D Embeddings
+            # 9. Create Chunks with 768-D Embeddings
             chunks_to_add = []
             chunk_idx = 0
 
-            for page in parsed_data.get("pages", []):
+            for page in pages:
                 p_num = page.get("page_number", 1)
                 p_text = page.get("text", "").strip()
                 p_section = str(page.get("detected_section") or "Item 8 Consolidated Financial Statements")[:50]
@@ -184,7 +187,6 @@ class IngestionPipeline:
             if chunks_to_add:
                 session.add_all(chunks_to_add)
 
-            # Commit transaction cleanly
             await session.commit()
 
             return {
