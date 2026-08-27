@@ -9,6 +9,7 @@ import sys
 import json
 from pathlib import Path
 
+# Add project root to sys.path
 root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
@@ -21,6 +22,7 @@ from app.core.database import SyncSessionLocal
 from app.models.domain import Company, Document, FinancialMetric
 from sqlalchemy import select, and_
 
+# Configure Page Layout & Title
 st.set_page_config(
     page_title="Financial RAG & Equity Intelligence Platform",
     page_icon="💎",
@@ -28,6 +30,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Custom Institutional Dark Theme CSS
 st.markdown("""
 <style>
     html {
@@ -73,6 +76,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 def run_async_safe(coro):
+    """Executes asynchronous coroutines cleanly in an isolated event loop."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -81,6 +85,7 @@ def run_async_safe(coro):
         loop.close()
 
 def format_currency_smart(val_in_millions):
+    """Formats millions into readable $B or $M without truncation."""
     if val_in_millions is None or pd.isna(val_in_millions):
         return "N/A"
     val = float(val_in_millions)
@@ -90,36 +95,31 @@ def format_currency_smart(val_in_millions):
         return f"${val:,.0f}M"
 
 def get_all_companies_annual_data():
+    """Fetches ONLY annual 10-K filings across companies (strictly excluding 10-Qs)."""
     with SyncSessionLocal() as session:
         stmt = select(Company, Document, FinancialMetric).\
             join(Document, Company.id == Document.company_id).\
             join(FinancialMetric, Document.id == FinancialMetric.document_id).\
             where(Document.form_type == "10-K").\
-            order_by(Company.ticker, Document.fiscal_year.desc(), Document.created_at.desc())
+            order_by(Company.ticker, Document.fiscal_year.desc())
         res = session.execute(stmt).all()
-        
-        unique_map = {}
-        for comp, doc, met in res:
-            key = (comp.ticker, doc.fiscal_year)
-            if key not in unique_map:
-                unique_map[key] = (comp, doc, met)
-        return list(unique_map.values())
+        return res
 
 def get_company_annual_history(ticker):
+    """Fetches clean chronological annual 10-K records and company name together."""
     with SyncSessionLocal() as session:
         stmt = select(Company, Document, FinancialMetric).\
             join(Document, Company.id == Document.company_id).\
             join(FinancialMetric, Document.id == FinancialMetric.document_id).\
             where(and_(Document.ticker == ticker, Document.form_type == "10-K")).\
-            order_by(Document.fiscal_year.asc(), Document.created_at.desc())
+            order_by(Document.fiscal_year.asc())
         res = session.execute(stmt).all()
         
         year_dict = {}
         company_name = f"{ticker} Inc."
         for comp, doc, met in res:
             company_name = comp.company_name
-            if doc.fiscal_year not in year_dict:
-                year_dict[doc.fiscal_year] = (doc, met)
+            year_dict[doc.fiscal_year] = (doc, met)
             
         sorted_years = sorted(year_dict.keys())
         filings_list = [year_dict[y] for y in sorted_years]
@@ -128,6 +128,7 @@ def get_company_annual_history(ticker):
 all_filings_data = get_all_companies_annual_data()
 ticker_set = sorted(list(set([comp.ticker for comp, doc, met in all_filings_data]))) if all_filings_data else []
 
+# ----------------- SIDEBAR: NAVIGATION & INGESTION -----------------
 with st.sidebar:
     st.title("🏦 Financial RAG")
     st.caption("AI-Powered SEC 10-K Equity Research Platform")
@@ -180,6 +181,10 @@ with st.sidebar:
     st.caption("Active Database: Neon Serverless PostgreSQL (pgvector)")
     st.caption("LLM Engine: Google Gemini 3.6 Flash")
 
+
+# =========================================================================
+# VIEW 1: PORTFOLIO BENCHMARK & COMPARISON (LANDING PAGE)
+# =========================================================================
 if view_mode == "📊 Portfolio Benchmark (Landing Page)":
     st.title("🏛️ Multi-Company Equity Benchmark Matrix")
     st.caption("Side-by-side annual 10-K performance comparison across ingested public companies.")
@@ -239,26 +244,20 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
         with ctrl_col3:
             chart_view_type = st.selectbox("📊 Chart Style", ["Horizontal Bars (Scales to 50+)", "2D Scatter Matrix (Bubble Chart)"])
 
+        # Filter records
         records = []
-        seen_keys = set()
-
         for comp, doc, met in all_filings_data:
             if comp.ticker in selected_companies and doc.fiscal_year in active_years:
-                dedup_key = (comp.ticker, doc.fiscal_year)
-                if dedup_key in seen_keys:
-                    continue
-                seen_keys.add(dedup_key)
-
                 fy_str = f"FY{doc.fiscal_year}"
                 label_with_year = f"{comp.ticker} ({fy_str})"
                 
-                rev_m = met.revenue or 0.0
-                gp_m = met.gross_profit or 0.0
-                op_m = met.operating_income or 0.0
-                net_m = met.net_income or 0.0
-                fcf_m = met.free_cash_flow or 0.0
-                debt_m = met.total_debt or 0.0
-                cash_m = met.total_cash_and_equivalents or 0.0
+                rev_m = met.revenue or 0
+                gp_m = met.gross_profit or 0
+                op_m = met.operating_income or 0
+                net_m = met.net_income or 0
+                fcf_m = met.free_cash_flow or 0
+                debt_m = met.total_debt or 0
+                cash_m = met.total_cash_and_equivalents or 0
 
                 records.append({
                     "Ticker": comp.ticker,
@@ -291,8 +290,6 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
         if df_filtered.empty:
             st.warning("No records match the current company and year selection.")
         else:
-            df_filtered = df_filtered.sort_values(by=["Ticker", "Year"], ascending=[True, True])
-
             if top_n_filter == "Top 5 by Revenue":
                 df_filtered = df_filtered.sort_values(by="Revenue ($M)", ascending=False).head(5)
             elif top_n_filter == "Top 10 by Revenue":
@@ -300,6 +297,7 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
             elif top_n_filter == "Top 10 by Op. Margin":
                 df_filtered = df_filtered.sort_values(by="Op. Margin Raw", ascending=False).head(10)
 
+            # Summary Table
             st.subheader(f"📌 Peer Benchmark Matrix ({len(selected_companies)} Companies, {len(active_years)} Fiscal Years)")
             st.dataframe(
                 df_filtered[[
@@ -331,12 +329,12 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
                 st.plotly_chart(fig_scatter, use_container_width=True)
 
             else:
-                dynamic_height = max(380, len(df_filtered) * 48)
+                dynamic_height = max(380, len(df_filtered) * 42)
 
                 col_w1, col_w2 = st.columns(2)
                 with col_w1:
                     fig_h_rev = px.bar(
-                        df_filtered,
+                        df_filtered.sort_values(by="Revenue ($M)", ascending=True),
                         y="Label",
                         x=["Revenue ($M)", "Net Income ($M)"],
                         barmode="group",
@@ -350,7 +348,7 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
 
                 with col_w2:
                     fig_h_mar = px.bar(
-                        df_filtered,
+                        df_filtered.sort_values(by="Op. Margin Raw", ascending=True),
                         y="Label",
                         x=["Gross Margin Raw", "Op. Margin Raw", "Net Margin Raw"],
                         barmode="group",
@@ -365,7 +363,7 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
                 col_w3, col_w4 = st.columns(2)
                 with col_w3:
                     fig_h_fcf = px.bar(
-                        df_filtered,
+                        df_filtered.sort_values(by="Free Cash Flow ($M)", ascending=True),
                         y="Label",
                         x=["Free Cash Flow ($M)", "Total Debt ($M)"],
                         barmode="group",
@@ -379,7 +377,7 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
 
                 with col_w4:
                     fig_h_de = px.bar(
-                        df_filtered,
+                        df_filtered.sort_values(by="Debt-to-Equity (x)", ascending=True),
                         y="Label",
                         x="Debt-to-Equity (x)",
                         orientation="h",
@@ -393,6 +391,7 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
 
         st.markdown("---")
 
+        # Global Portfolio Copilot
         st.subheader("💬 Portfolio Financial Copilot (Cross-Company Q&A)")
         st.caption("Ask comparative questions across all ingested annual 10-K reports.")
 
@@ -410,11 +409,12 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
                                 st.markdown(f"**{cit['ticker']} — Page {cit['page_number']} [{cit['section']}]** *(Score: {cit['score']})*")
                                 st.caption(cit["content_snippet"])
 
+        # Dedicated Form Input with proper index notation [0] and [1]
         with st.form(key="port_chat_form", clear_on_submit=True):
-            p_cols = st.columns()
+            p_cols = st.columns([5, 1])
             with p_cols[0]:
                 portfolio_prompt = st.text_input("Ask a cross-company question...", label_visibility="collapsed", placeholder="Type a comparative question across all companies...")
-            with p_cols:
+            with p_cols[1]:
                 submit_port = st.form_submit_button("Send 💬", use_container_width=True)
 
             if submit_port and portfolio_prompt:
@@ -440,6 +440,9 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
                             })
                 st.rerun()
 
+# =========================================================================
+# VIEW 2: COMPANY DEEP-DIVE (PREMIUM INTELLIGENCE STUDIO)
+# =========================================================================
 else:
     selected_ticker = st.selectbox("📌 Select Target Company", options=ticker_set, index=0)
     company_name_resolved, company_filings = get_company_annual_history(selected_ticker)
@@ -451,13 +454,13 @@ else:
     for doc_item, met_item in company_filings:
         fy_str = f"FY{doc_item.fiscal_year}"
         
-        rev_m = met_item.revenue or 0.0
-        gp_m = met_item.gross_profit or 0.0
-        op_m = met_item.operating_income or 0.0
-        net_m = met_item.net_income or 0.0
-        fcf_m = met_item.free_cash_flow or 0.0
-        debt_m = met_item.total_debt or 0.0
-        cash_m = met_item.total_cash_and_equivalents or 0.0
+        rev_m = met_item.revenue or 0
+        gp_m = met_item.gross_profit or 0
+        op_m = met_item.operating_income or 0
+        net_m = met_item.net_income or 0
+        fcf_m = met_item.free_cash_flow or 0
+        debt_m = met_item.total_debt or 0
+        cash_m = met_item.total_cash_and_equivalents or 0
 
         timeline_records.append({
             "Fiscal Year": fy_str,
@@ -484,11 +487,13 @@ else:
 
     df_multiyear = pd.DataFrame(timeline_records)
 
+    # 1. Sleek Header Banner
     year_range_str = f"{df_multiyear['Fiscal Year'].iloc[0]} – {df_multiyear['Fiscal Year'].iloc[-1]}" if not df_multiyear.empty else "FY2025"
 
     st.markdown(f"## 💎 {selected_ticker} — {company_name_resolved}")
     st.caption(f"Comprehensive SEC Form 10-K Equity Research & Analytics ({year_range_str})")
 
+    # 2. Executive Fundamental Scorecard (6 Cards with Clear Formatted Values)
     if latest_metric:
         st.markdown(f"#### 📊 Latest Fiscal Position (FY{latest_doc.fiscal_year})")
         kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
@@ -507,6 +512,7 @@ else:
 
     st.markdown("---")
 
+    # 3. Clean Multi-Year Annual Statement Table
     if not df_multiyear.empty:
         st.subheader("📅 Multi-Year Annual Financial Model Trajectory")
         st.dataframe(
@@ -518,6 +524,7 @@ else:
             use_container_width=True
         )
 
+    # 4. AI Strategic Overview Drawer
     if latest_doc and latest_doc.executive_summary:
         with st.expander(f"🤖 View AI Strategic Synthesis & Risk Factors (FY{latest_doc.fiscal_year})", expanded=False):
             st.write(latest_doc.executive_summary)
@@ -541,6 +548,7 @@ else:
 
     st.markdown("---")
 
+    # 5. SIDE-BY-SIDE SPLIT VIEW: Interactive Studio (Left) vs. Annual Copilot (Right)
     left_col, right_col = st.columns([1.1, 0.9])
 
     with left_col:
@@ -656,8 +664,9 @@ else:
                 )
                 st.plotly_chart(fig_t_fcf, use_container_width=True)
 
+    # RIGHT COLUMN: Dedicated Annual Chat Studio with proper [0] and [1] indexing
     with right_col:
-        col_c_hdr1, col_c_hdr2 = st.columns()
+        col_c_hdr1, col_c_hdr2 = st.columns([3, 1])
         with col_c_hdr1:
             st.subheader(f"💬 {selected_ticker} Copilot")
         with col_c_hdr2:
@@ -677,6 +686,7 @@ else:
                 }
             ]
 
+        # Dedicated Scrollable Container
         deep_chat_container = st.container(height=430)
         with deep_chat_container:
             for msg in st.session_state[chat_history_key]:
@@ -685,14 +695,15 @@ else:
                     if msg.get("citations"):
                         with st.expander("📑 Audit Citations"):
                             for cit in msg["citations"]:
-                                st.markdown(f"**Page {cit['page_number']} [{cit['section']}]** *(Score: {cit['score']})*")
+                                st.markdown(f"**{cit['ticker']} — Page {cit['page_number']} [{cit['section']}]** *(Score: {cit['score']})*")
                                 st.caption(cit["content_snippet"])
 
+        # Dedicated In-Column Chat Form with proper [0] and [1] indexing
         with st.form(key=f"deep_chat_form_{selected_ticker}", clear_on_submit=True):
-            d_cols = st.columns()
+            d_cols = st.columns([5, 1])
             with d_cols[0]:
                 deep_prompt = st.text_input("Ask about financials...", label_visibility="collapsed", placeholder=f"Ask about {selected_ticker} annual revenue, margins, debt, risks...")
-            with d_cols:
+            with d_cols[1]:
                 submit_deep = st.form_submit_button("Send 💬", use_container_width=True)
 
             if submit_deep and deep_prompt:
@@ -708,7 +719,7 @@ else:
                             if response.get("citations"):
                                 with st.expander("📑 Audit Citations"):
                                     for cit in response["citations"]:
-                                        st.markdown(f"**Page {cit['page_number']} [{cit['section']}]** *(Score: {cit['score']})*")
+                                        st.markdown(f"**{cit['ticker']} — Page {cit['page_number']} [{cit['section']}]** *(Score: {cit['score']})*")
                                         st.caption(cit["content_snippet"])
 
                             st.session_state[chat_history_key].append({

@@ -1,19 +1,18 @@
 import math
 import asyncio
 from typing import List, Dict, Any, Optional
-from sqlalchemy import select, and_, not_
+from sqlalchemy import select, and_
 from rank_bm25 import BM25Okapi
 from app.core.database import AsyncSessionLocal
-from app.models.domain import DocumentChunk
+from app.models.domain import DocumentChunk, Document
 from app.rag.embedder import FinancialEmbedder
 
 class HybridRetriever:
     """
-    Hybrid Search Engine combining:
+    Hybrid Search Engine strictly retrieving Annual Form 10-K Disclosures:
     1. Dense Vector Cosine Similarity (pgvector 768-dim embeddings)
     2. Sparse BM25 Keyword Search
     3. Reciprocal Rank Fusion (RRF) for robust multi-modal retrieval.
-    Strictly filters to Form 10-K Annual Filings.
     """
 
     def __init__(self, k_rrf: int = 60):
@@ -28,30 +27,32 @@ class HybridRetriever:
         top_k: int = 6
     ) -> List[Dict[str, Any]]:
         async with AsyncSessionLocal() as session:
-            stmt = select(DocumentChunk)
+            # Strictly filter to 10-K documents to prevent mixing with old quarterly test data
+            stmt = select(DocumentChunk, Document).\
+                join(Document, DocumentChunk.document_id == Document.id).\
+                where(Document.form_type == "10-K")
+
             filters = []
-            
             if ticker and ticker.upper() not in ["ALL", "PORTFOLIO", ""]:
                 filters.append(DocumentChunk.ticker == ticker.upper())
             if section:
                 filters.append(DocumentChunk.section == section)
 
-            # Strictly exclude quarterly 10-Q fragments from citations
-            filters.append(not_(DocumentChunk.section.ilike("%10-Q%")))
-            filters.append(not_(DocumentChunk.section.ilike("%Q1%")))
-            filters.append(not_(DocumentChunk.section.ilike("%Q2%")))
-            filters.append(not_(DocumentChunk.section.ilike("%Q3%")))
-            filters.append(not_(DocumentChunk.section.ilike("%Q4 20%")))
+            if filters:
+                stmt = stmt.where(and_(*filters))
 
-            stmt = stmt.where(and_(*filters)).limit(250)
+            stmt = stmt.limit(250)
             res = await session.execute(stmt)
-            chunks = res.scalars().all()
+            rows = res.all()
 
-        if not chunks:
+        if not rows:
             return []
 
+        chunks_with_doc = [(chunk, doc) for chunk, doc in rows]
+        chunks = [c for c, d in chunks_with_doc]
+
+        # 1. Dense Semantic Retrieval
         query_embedding = self.embedder.embed_query(query)
-        
         dense_candidates = []
         for c in chunks:
             if c.embedding is not None:
@@ -64,6 +65,7 @@ class HybridRetriever:
 
         dense_ranked = [c for c, _ in sorted(dense_candidates, key=lambda x: x[1], reverse=True)]
 
+        # 2. Sparse Lexical Retrieval (BM25)
         chunk_texts = [getattr(c, "content", getattr(c, "chunk_text", "")) or "" for c in chunks]
         tokenized_corpus = [t.lower().split() if t else [""] for t in chunk_texts]
         bm25 = BM25Okapi(tokenized_corpus)
@@ -73,8 +75,10 @@ class HybridRetriever:
         sparse_candidates = [(chunks[i], bm25_scores[i]) for i in range(len(chunks))]
         sparse_ranked = [c for c, _ in sorted(sparse_candidates, key=lambda x: x[1], reverse=True)]
 
+        # 3. Reciprocal Rank Fusion
         rrf_scores = {}
         chunk_map = {}
+        doc_map = {c.id: d for c, d in chunks_with_doc}
 
         for rank, chunk in enumerate(dense_ranked):
             chunk_map[chunk.id] = chunk
@@ -89,11 +93,15 @@ class HybridRetriever:
         results = []
         for cid in sorted_chunk_ids:
             chunk = chunk_map[cid]
+            doc = doc_map.get(cid)
             c_text = getattr(chunk, "content", getattr(chunk, "chunk_text", "")) or ""
+            fy_str = f"FY{doc.fiscal_year}" if doc and doc.fiscal_year else "10-K"
             results.append({
                 "id": str(chunk.id),
                 "ticker": chunk.ticker,
-                "section": chunk.section or "Form 10-K",
+                "fiscal_year": doc.fiscal_year if doc else None,
+                "fiscal_period": fy_str,
+                "section": chunk.section or "Item 8",
                 "page_number": chunk.page_number or 1,
                 "chunk_text": c_text,
                 "content": c_text,
