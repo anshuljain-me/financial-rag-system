@@ -85,14 +85,33 @@ def run_async_safe(coro):
         loop.close()
 
 def format_currency_smart(val_in_millions):
-    """Formats millions into readable $B or $M without truncation."""
+    """Formats millions into readable $B or $M safely with zero TypeError risk."""
     if val_in_millions is None or pd.isna(val_in_millions):
         return "N/A"
-    val = float(val_in_millions)
-    if abs(val) >= 1000:
-        return f"${val / 1000:,.2f}B"
-    else:
-        return f"${val:,.0f}M"
+    try:
+        val = float(str(val_in_millions).replace("$", "").replace(",", ""))
+        if abs(val) >= 1000:
+            return f"${val / 1000:,.2f}B"
+        else:
+            return f"${val:,.0f}M"
+    except Exception:
+        return "N/A"
+
+def format_pct_safe(val):
+    if val is None or pd.isna(val):
+        return "N/A"
+    try:
+        return f"{float(val):.1f}%"
+    except Exception:
+        return "N/A"
+
+def format_eps_safe(val):
+    if val is None or pd.isna(val):
+        return "N/A"
+    try:
+        return f"${float(val):.2f}"
+    except Exception:
+        return "N/A"
 
 def get_all_companies_annual_data():
     """Fetches ONLY annual 10-K filings across companies (strictly excluding 10-Qs)."""
@@ -156,15 +175,15 @@ with st.sidebar:
     if target_ticker:
         sec_fetcher = SECFilingFetcher()
         available_years = sec_fetcher.get_available_years(target_ticker)
-        min_yr = min(available_years)
-        max_yr = max(available_years)
+        min_yr = min(available_years) if available_years else 2021
+        max_yr = max(available_years) if available_years else 2025
         
         st.markdown(f"**📅 Available 10-K Filings ({min_yr} – {max_yr}):**")
         
         selected_years = st.multiselect(
             "Select Fiscal Years to Ingest:",
             options=available_years,
-            default=available_years[:5],
+            default=available_years[:5] if len(available_years) >= 5 else available_years,
             help="Select one, several, or all 10 years to ingest."
         )
 
@@ -244,20 +263,20 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
         with ctrl_col3:
             chart_view_type = st.selectbox("📊 Chart Style", ["Horizontal Bars (Scales to 50+)", "2D Scatter Matrix (Bubble Chart)"])
 
-        # Filter records
+        # Filter records with complete null-safety
         records = []
         for comp, doc, met in all_filings_data:
             if comp.ticker in selected_companies and doc.fiscal_year in active_years:
                 fy_str = f"FY{doc.fiscal_year}"
                 label_with_year = f"{comp.ticker} ({fy_str})"
                 
-                rev_m = met.revenue or 0
-                gp_m = met.gross_profit or 0
-                op_m = met.operating_income or 0
-                net_m = met.net_income or 0
-                fcf_m = met.free_cash_flow or 0
-                debt_m = met.total_debt or 0
-                cash_m = met.total_cash_and_equivalents or 0
+                rev_m = met.revenue or 0.0
+                gp_m = met.gross_profit or 0.0
+                op_m = met.operating_income or 0.0
+                net_m = met.net_income or 0.0
+                fcf_m = met.free_cash_flow or 0.0
+                debt_m = met.total_debt or 0.0
+                cash_m = met.total_cash_and_equivalents or 0.0
 
                 records.append({
                     "Ticker": comp.ticker,
@@ -267,19 +286,19 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
                     "Year": doc.fiscal_year,
                     "Revenue": format_currency_smart(rev_m),
                     "Revenue ($M)": rev_m,
-                    "Gross Margin (%)": f"{met.gross_margin:.1f}%" if met.gross_margin else "N/A",
-                    "Gross Margin Raw": met.gross_margin or 0.0,
-                    "Op. Margin (%)": f"{met.operating_margin:.1f}%" if met.operating_margin else "N/A",
-                    "Op. Margin Raw": met.operating_margin or 0.0,
+                    "Gross Margin (%)": format_pct_safe(met.gross_margin),
+                    "Gross Margin Raw": met.gross_margin if met.gross_margin is not None else 0.0,
+                    "Op. Margin (%)": format_pct_safe(met.operating_margin),
+                    "Op. Margin Raw": met.operating_margin if met.operating_margin is not None else 0.0,
                     "Net Income": format_currency_smart(net_m),
                     "Net Income ($M)": net_m,
-                    "Net Margin (%)": f"{met.net_profit_margin:.1f}%" if met.net_profit_margin else "N/A",
-                    "Net Margin Raw": met.net_profit_margin or 0.0,
-                    "Diluted EPS": f"${met.diluted_eps:.2f}" if met.diluted_eps else "N/A",
+                    "Net Margin (%)": format_pct_safe(met.net_profit_margin),
+                    "Net Margin Raw": met.net_profit_margin if met.net_profit_margin is not None else 0.0,
+                    "Diluted EPS": format_eps_safe(met.diluted_eps),
                     "Free Cash Flow": format_currency_smart(fcf_m),
                     "Free Cash Flow ($M)": fcf_m,
-                    "Debt/Equity": f"{met.debt_to_equity:.2f}x" if met.debt_to_equity else "N/A",
-                    "Debt-to-Equity (x)": met.debt_to_equity or 0.0,
+                    "Debt/Equity": f"{met.debt_to_equity:.2f}x" if met.debt_to_equity is not None else "N/A",
+                    "Debt-to-Equity (x)": met.debt_to_equity if met.debt_to_equity is not None else 0.0,
                     "Total Debt": format_currency_smart(debt_m),
                     "Total Debt ($M)": debt_m,
                     "Cash & Equivalents": format_currency_smart(cash_m)
@@ -317,7 +336,7 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
                     df_filtered,
                     x="Revenue ($M)",
                     y="Op. Margin Raw",
-                    size=df_filtered["Free Cash Flow ($M)"].apply(lambda v: max(float(v), 50.0)),
+                    size=df_filtered["Free Cash Flow ($M)"].apply(lambda v: max(float(v if v is not None else 0), 50.0)),
                     color="Net Margin Raw",
                     hover_name="Label",
                     text="Label",
@@ -409,7 +428,7 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
                                 st.markdown(f"**{cit['ticker']} — Page {cit['page_number']} [{cit['section']}]** *(Score: {cit['score']})*")
                                 st.caption(cit["content_snippet"])
 
-        # Dedicated Form Input with proper index notation [0] and [1]
+        # Dedicated Form Input to avoid auto-scrolling
         with st.form(key="port_chat_form", clear_on_submit=True):
             p_cols = st.columns([5, 1])
             with p_cols[0]:
@@ -444,287 +463,290 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
 # VIEW 2: COMPANY DEEP-DIVE (PREMIUM INTELLIGENCE STUDIO)
 # =========================================================================
 else:
-    selected_ticker = st.selectbox("📌 Select Target Company", options=ticker_set, index=0)
-    company_name_resolved, company_filings = get_company_annual_history(selected_ticker)
-    
-    timeline_records = []
-    latest_doc = None
-    latest_metric = None
-
-    for doc_item, met_item in company_filings:
-        fy_str = f"FY{doc_item.fiscal_year}"
+    if not ticker_set:
+        st.info("No companies ingested yet. Use the sidebar to ingest your first 10-K report.")
+    else:
+        selected_ticker = st.selectbox("📌 Select Target Company", options=ticker_set, index=0)
+        company_name_resolved, company_filings = get_company_annual_history(selected_ticker)
         
-        rev_m = met_item.revenue or 0
-        gp_m = met_item.gross_profit or 0
-        op_m = met_item.operating_income or 0
-        net_m = met_item.net_income or 0
-        fcf_m = met_item.free_cash_flow or 0
-        debt_m = met_item.total_debt or 0
-        cash_m = met_item.total_cash_and_equivalents or 0
+        timeline_records = []
+        latest_doc = None
+        latest_metric = None
 
-        timeline_records.append({
-            "Fiscal Year": fy_str,
-            "Year": doc_item.fiscal_year,
-            "Revenue": format_currency_smart(rev_m),
-            "Revenue ($M)": rev_m,
-            "Gross Margin (%)": f"{met_item.gross_margin:.1f}%" if met_item.gross_margin else "N/A",
-            "Gross Margin Raw": met_item.gross_margin or 0.0,
-            "Operating Margin (%)": f"{met_item.operating_margin:.1f}%" if met_item.operating_margin else "N/A",
-            "Op. Margin Raw": met_item.operating_margin or 0.0,
-            "Net Income": format_currency_smart(net_m),
-            "Net Income ($M)": net_m,
-            "Net Margin (%)": f"{met_item.net_profit_margin:.1f}%" if met_item.net_profit_margin else "N/A",
-            "Diluted EPS": f"${met_item.diluted_eps:.2f}" if met_item.diluted_eps else "N/A",
-            "Free Cash Flow": format_currency_smart(fcf_m),
-            "Free Cash Flow ($M)": fcf_m,
-            "Total Debt": format_currency_smart(debt_m),
-            "Total Debt ($M)": debt_m,
-            "Cash & Equivalents": format_currency_smart(cash_m),
-            "Debt/Equity": f"{met_item.debt_to_equity:.2f}x" if met_item.debt_to_equity else "N/A"
-        })
-        latest_doc = doc_item
-        latest_metric = met_item
+        for doc_item, met_item in company_filings:
+            fy_str = f"FY{doc_item.fiscal_year}"
+            
+            rev_m = met_item.revenue or 0.0
+            gp_m = met_item.gross_profit or 0.0
+            op_m = met_item.operating_income or 0.0
+            net_m = met_item.net_income or 0.0
+            fcf_m = met_item.free_cash_flow or 0.0
+            debt_m = met_item.total_debt or 0.0
+            cash_m = met_item.total_cash_and_equivalents or 0.0
 
-    df_multiyear = pd.DataFrame(timeline_records)
+            timeline_records.append({
+                "Fiscal Year": fy_str,
+                "Year": doc_item.fiscal_year,
+                "Revenue": format_currency_smart(rev_m),
+                "Revenue ($M)": rev_m,
+                "Gross Margin (%)": format_pct_safe(met_item.gross_margin),
+                "Gross Margin Raw": met_item.gross_margin if met_item.gross_margin is not None else 0.0,
+                "Operating Margin (%)": format_pct_safe(met_item.operating_margin),
+                "Op. Margin Raw": met_item.operating_margin if met_item.operating_margin is not None else 0.0,
+                "Net Income": format_currency_smart(net_m),
+                "Net Income ($M)": net_m,
+                "Net Margin (%)": format_pct_safe(met_item.net_profit_margin),
+                "Diluted EPS": format_eps_safe(met_item.diluted_eps),
+                "Free Cash Flow": format_currency_smart(fcf_m),
+                "Free Cash Flow ($M)": fcf_m,
+                "Total Debt": format_currency_smart(debt_m),
+                "Total Debt ($M)": debt_m,
+                "Cash & Equivalents": format_currency_smart(cash_m),
+                "Debt/Equity": f"{met_item.debt_to_equity:.2f}x" if met_item.debt_to_equity is not None else "N/A"
+            })
+            latest_doc = doc_item
+            latest_metric = met_item
 
-    # 1. Sleek Header Banner
-    year_range_str = f"{df_multiyear['Fiscal Year'].iloc[0]} – {df_multiyear['Fiscal Year'].iloc[-1]}" if not df_multiyear.empty else "FY2025"
+        df_multiyear = pd.DataFrame(timeline_records)
 
-    st.markdown(f"## 💎 {selected_ticker} — {company_name_resolved}")
-    st.caption(f"Comprehensive SEC Form 10-K Equity Research & Analytics ({year_range_str})")
+        # 1. Sleek Header Banner
+        year_range_str = f"{df_multiyear['Fiscal Year'].iloc[0]} – {df_multiyear['Fiscal Year'].iloc[-1]}" if not df_multiyear.empty else "FY2025"
 
-    # 2. Executive Fundamental Scorecard (6 Cards with Clear Formatted Values)
-    if latest_metric:
-        st.markdown(f"#### 📊 Latest Fiscal Position (FY{latest_doc.fiscal_year})")
-        kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
-        with kpi1:
-            st.markdown(f"""<div class="metric-box"><div class="metric-title">Annual Revenue</div><div class="metric-value">{format_currency_smart(latest_metric.revenue)}</div><div class="metric-subtitle">Top-Line Scale</div></div>""", unsafe_allow_html=True)
-        with kpi2:
-            st.markdown(f"""<div class="metric-box"><div class="metric-title">Gross Margin</div><div class="metric-value">{latest_metric.gross_margin:.1f}%</div><div class="metric-subtitle">Pricing Power</div></div>""", unsafe_allow_html=True)
-        with kpi3:
-            st.markdown(f"""<div class="metric-box"><div class="metric-title">Operating Margin</div><div class="metric-value">{latest_metric.operating_margin:.1f}%</div><div class="metric-subtitle">EBIT Efficiency</div></div>""", unsafe_allow_html=True)
-        with kpi4:
-            st.markdown(f"""<div class="metric-box"><div class="metric-title">Net Income</div><div class="metric-value">{format_currency_smart(latest_metric.net_income)}</div><div class="metric-subtitle">Bottom-Line Profit</div></div>""", unsafe_allow_html=True)
-        with kpi5:
-            st.markdown(f"""<div class="metric-box"><div class="metric-title">Diluted EPS</div><div class="metric-value">${latest_metric.diluted_eps:.2f}</div><div class="metric-subtitle">Per Share Earning</div></div>""", unsafe_allow_html=True)
-        with kpi6:
-            st.markdown(f"""<div class="metric-box"><div class="metric-title">Free Cash Flow</div><div class="metric-value">{format_currency_smart(latest_metric.free_cash_flow)}</div><div class="metric-subtitle">Cash Conversion</div></div>""", unsafe_allow_html=True)
+        st.markdown(f"## 💎 {selected_ticker} — {company_name_resolved}")
+        st.caption(f"Comprehensive SEC Form 10-K Equity Research & Analytics ({year_range_str})")
 
-    st.markdown("---")
+        # 2. Executive Fundamental Scorecard (6 Cards with Null-Safe Formatted Values)
+        if latest_metric and latest_doc:
+            st.markdown(f"#### 📊 Latest Fiscal Position (FY{latest_doc.fiscal_year})")
+            kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
+            with kpi1:
+                st.markdown(f"""<div class="metric-box"><div class="metric-title">Annual Revenue</div><div class="metric-value">{format_currency_smart(latest_metric.revenue)}</div><div class="metric-subtitle">Top-Line Scale</div></div>""", unsafe_allow_html=True)
+            with kpi2:
+                st.markdown(f"""<div class="metric-box"><div class="metric-title">Gross Margin</div><div class="metric-value">{format_pct_safe(latest_metric.gross_margin)}</div><div class="metric-subtitle">Pricing Power</div></div>""", unsafe_allow_html=True)
+            with kpi3:
+                st.markdown(f"""<div class="metric-box"><div class="metric-title">Operating Margin</div><div class="metric-value">{format_pct_safe(latest_metric.operating_margin)}</div><div class="metric-subtitle">EBIT Efficiency</div></div>""", unsafe_allow_html=True)
+            with kpi4:
+                st.markdown(f"""<div class="metric-box"><div class="metric-title">Net Income</div><div class="metric-value">{format_currency_smart(latest_metric.net_income)}</div><div class="metric-subtitle">Bottom-Line Profit</div></div>""", unsafe_allow_html=True)
+            with kpi5:
+                st.markdown(f"""<div class="metric-box"><div class="metric-title">Diluted EPS</div><div class="metric-value">{format_eps_safe(latest_metric.diluted_eps)}</div><div class="metric-subtitle">Per Share Earning</div></div>""", unsafe_allow_html=True)
+            with kpi6:
+                st.markdown(f"""<div class="metric-box"><div class="metric-title">Free Cash Flow</div><div class="metric-value">{format_currency_smart(latest_metric.free_cash_flow)}</div><div class="metric-subtitle">Cash Conversion</div></div>""", unsafe_allow_html=True)
 
-    # 3. Clean Multi-Year Annual Statement Table
-    if not df_multiyear.empty:
-        st.subheader("📅 Multi-Year Annual Financial Model Trajectory")
-        st.dataframe(
-            df_multiyear[[
-                "Fiscal Year", "Revenue", "Gross Margin (%)", "Operating Margin (%)",
-                "Net Income", "Net Margin (%)", "Diluted EPS", "Free Cash Flow",
-                "Total Debt", "Cash & Equivalents", "Debt/Equity"
-            ]],
-            use_container_width=True
-        )
+        st.markdown("---")
 
-    # 4. AI Strategic Overview Drawer
-    if latest_doc and latest_doc.executive_summary:
-        with st.expander(f"🤖 View AI Strategic Synthesis & Risk Factors (FY{latest_doc.fiscal_year})", expanded=False):
-            st.write(latest_doc.executive_summary)
-            col_r, col_c = st.columns(2)
-            with col_r:
-                st.markdown("##### ⚠️ Core Risk Factors (Item 1A)")
-                try:
-                    risks = json.loads(latest_doc.key_risks) if isinstance(latest_doc.key_risks, str) else latest_doc.key_risks
-                    for r in risks:
-                        st.markdown(f"* {r}")
-                except Exception:
-                    st.write(latest_doc.key_risks)
-            with col_c:
-                st.markdown("##### 🚀 Growth Catalysts & Strategic Drivers")
-                try:
-                    cats = json.loads(latest_doc.growth_catalysts) if isinstance(latest_doc.growth_catalysts, str) else doc.growth_catalysts
-                    for c in cats:
-                        st.markdown(f"* {c}")
-                except Exception:
-                    st.write(doc.growth_catalysts)
+        # 3. Clean Multi-Year Annual Statement Table
+        if not df_multiyear.empty:
+            st.subheader("📅 Multi-Year Annual Financial Model Trajectory")
+            st.dataframe(
+                df_multiyear[[
+                    "Fiscal Year", "Revenue", "Gross Margin (%)", "Operating Margin (%)",
+                    "Net Income", "Net Margin (%)", "Diluted EPS", "Free Cash Flow",
+                    "Total Debt", "Cash & Equivalents", "Debt/Equity"
+                ]],
+                use_container_width=True
+            )
 
-    st.markdown("---")
+        # 4. AI Strategic Overview Drawer
+        if latest_doc and latest_doc.executive_summary:
+            with st.expander(f"🤖 View AI Strategic Synthesis & Risk Factors (FY{latest_doc.fiscal_year})", expanded=False):
+                st.write(latest_doc.executive_summary)
+                col_r, col_c = st.columns(2)
+                with col_r:
+                    st.markdown("##### ⚠️ Core Risk Factors (Item 1A)")
+                    try:
+                        risks = json.loads(latest_doc.key_risks) if isinstance(latest_doc.key_risks, str) else latest_doc.key_risks
+                        for r in risks:
+                            st.markdown(f"* {r}")
+                    except Exception:
+                        st.write(latest_doc.key_risks)
+                with col_c:
+                    st.markdown("##### 🚀 Growth Catalysts & Strategic Drivers")
+                    try:
+                        cats = json.loads(latest_doc.growth_catalysts) if isinstance(latest_doc.growth_catalysts, str) else doc.growth_catalysts
+                        for c in cats:
+                            st.markdown(f"* {c}")
+                    except Exception:
+                        st.write(doc.growth_catalysts)
 
-    # 5. SIDE-BY-SIDE SPLIT VIEW: Interactive Studio (Left) vs. Annual Copilot (Right)
-    left_col, right_col = st.columns([1.1, 0.9])
+        st.markdown("---")
 
-    with left_col:
-        st.subheader("📈 Technical & Fundamental Studio")
-        
-        tab_tech, tab_growth, tab_bs = st.tabs(["🕯️ Candlesticks & Technicals", "📊 Growth Trajectory", "⚖️ Debt & Cash Balance"])
+        # 5. SIDE-BY-SIDE SPLIT VIEW: Interactive Studio (Left) vs. Annual Copilot (Right)
+        left_col, right_col = st.columns([1.1, 0.9])
 
-        with tab_tech:
-            ta_engine = TechnicalAnalysisEngine()
-            ta_data = ta_engine.fetch_and_analyze(selected_ticker)
+        with left_col:
+            st.subheader("📈 Technical & Fundamental Studio")
+            
+            tab_tech, tab_growth, tab_bs = st.tabs(["🕯️ Candlesticks & Technicals", "📊 Growth Trajectory", "⚖️ Debt & Cash Balance"])
 
-            if "error" in ta_data:
-                st.error(ta_data["error"])
-            else:
-                tc1, tc2, tc3 = st.columns(3)
-                with tc1:
-                    st.metric("Live Market Price", f"${ta_data['current_price']}", f"{ta_data['price_change_pct']}%")
-                with tc2:
-                    st.metric("RSI (14-Day)", f"{ta_data['rsi_14']}")
-                with tc3:
-                    st.metric("50 SMA / 200 SMA", f"${ta_data['sma_50']} / ${ta_data['sma_200']}")
+            with tab_tech:
+                ta_engine = TechnicalAnalysisEngine()
+                ta_data = ta_engine.fetch_and_analyze(selected_ticker)
 
-                with st.expander("🎯 Active Technical Momentum Signals", expanded=True):
-                    for sig in ta_data["technical_signals"]:
-                        st.info(sig)
+                if "error" in ta_data:
+                    st.error(ta_data["error"])
+                else:
+                    tc1, tc2, tc3 = st.columns(3)
+                    with tc1:
+                        st.metric("Live Market Price", f"${ta_data['current_price']}", f"{ta_data['price_change_pct']}%")
+                    with tc2:
+                        st.metric("RSI (14-Day)", f"{ta_data['rsi_14']}")
+                    with tc3:
+                        st.metric("50 SMA / 200 SMA", f"${ta_data['sma_50']} / ${ta_data['sma_200']}")
 
-                history = ta_data["history"]
-                if history:
-                    df_chart = pd.DataFrame(history)
-                    fig = make_subplots(
-                        rows=2, cols=1,
-                        shared_xaxes=True,
-                        vertical_spacing=0.06,
-                        row_heights=[0.7, 0.3],
-                        subplot_titles=(f"{selected_ticker} Candlesticks & Moving Averages", "RSI (14)")
-                    )
+                    with st.expander("🎯 Active Technical Momentum Signals", expanded=True):
+                        for sig in ta_data["technical_signals"]:
+                            st.info(sig)
 
-                    fig.add_trace(
-                        go.Candlestick(
-                            x=df_chart["Date"],
-                            open=df_chart["Open"],
-                            high=df_chart["High"],
-                            low=df_chart["Low"],
-                            close=df_chart["Close"],
-                            name="OHLC"
-                        ),
-                        row=1, col=1
-                    )
+                    history = ta_data["history"]
+                    if history:
+                        df_chart = pd.DataFrame(history)
+                        fig = make_subplots(
+                            rows=2, cols=1,
+                            shared_xaxes=True,
+                            vertical_spacing=0.06,
+                            row_heights=[0.7, 0.3],
+                            subplot_titles=(f"{selected_ticker} Candlesticks & Moving Averages", "RSI (14)")
+                        )
 
-                    fig.add_trace(
-                        go.Scatter(x=df_chart["Date"], y=df_chart["SMA_50"], line=dict(color="orange", width=1.5), name="50 SMA"),
-                        row=1, col=1
-                    )
+                        fig.add_trace(
+                            go.Candlestick(
+                                x=df_chart["Date"],
+                                open=df_chart["Open"],
+                                high=df_chart["High"],
+                                low=df_chart["Low"],
+                                close=df_chart["Close"],
+                                name="OHLC"
+                            ),
+                            row=1, col=1
+                        )
 
-                    fig.add_trace(
-                        go.Scatter(x=df_chart["Date"], y=df_chart["SMA_200"], line=dict(color="cyan", width=1.5), name="200 SMA"),
-                        row=1, col=1
-                    )
+                        fig.add_trace(
+                            go.Scatter(x=df_chart["Date"], y=df_chart["SMA_50"], line=dict(color="orange", width=1.5), name="50 SMA"),
+                            row=1, col=1
+                        )
 
-                    fig.add_trace(
-                        go.Scatter(x=df_chart["Date"], y=df_chart["RSI_14"], line=dict(color="#b388ff", width=1.5), name="RSI"),
-                        row=2, col=1
-                    )
-                    fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-                    fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+                        fig.add_trace(
+                            go.Scatter(x=df_chart["Date"], y=df_chart["SMA_200"], line=dict(color="cyan", width=1.5), name="200 SMA"),
+                            row=1, col=1
+                        )
 
-                    fig.update_layout(
-                        height=480,
-                        xaxis_rangeslider_visible=False,
+                        fig.add_trace(
+                            go.Scatter(x=df_chart["Date"], y=df_chart["RSI_14"], line=dict(color="#b388ff", width=1.5), name="RSI"),
+                            row=2, col=1
+                        )
+                        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+                        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+                        fig.update_layout(
+                            height=480,
+                            xaxis_rangeslider_visible=False,
+                            template="plotly_dark",
+                            margin=dict(l=10, r=10, t=30, b=10)
+                        )
+
+                        st.plotly_chart(fig, use_container_width=True)
+
+            with tab_growth:
+                if not df_multiyear.empty:
+                    fig_t_rev = px.bar(
+                        df_multiyear,
+                        x="Fiscal Year",
+                        y=["Revenue ($M)", "Net Income ($M)"],
+                        barmode="group",
+                        title=f"{selected_ticker} Multi-Year Revenue & Net Income ($M)",
+                        color_discrete_sequence=["#4a86e8", "#00c853"],
                         template="plotly_dark",
-                        margin=dict(l=10, r=10, t=30, b=10)
+                        height=460
                     )
+                    st.plotly_chart(fig_t_rev, use_container_width=True)
 
-                    st.plotly_chart(fig, use_container_width=True)
+                    fig_t_mar = px.line(
+                        df_multiyear,
+                        x="Fiscal Year",
+                        y=["Gross Margin Raw", "Op. Margin Raw"],
+                        markers=True,
+                        title=f"{selected_ticker} Margin Evolution Over Time (%)",
+                        color_discrete_sequence=["#ff9800", "#00e676"],
+                        template="plotly_dark",
+                        height=380
+                    )
+                    st.plotly_chart(fig_t_mar, use_container_width=True)
 
-        with tab_growth:
-            if not df_multiyear.empty:
-                fig_t_rev = px.bar(
-                    df_multiyear,
-                    x="Fiscal Year",
-                    y=["Revenue ($M)", "Net Income ($M)"],
-                    barmode="group",
-                    title=f"{selected_ticker} Multi-Year Revenue & Net Income ($M)",
-                    color_discrete_sequence=["#4a86e8", "#00c853"],
-                    template="plotly_dark",
-                    height=460
-                )
-                st.plotly_chart(fig_t_rev, use_container_width=True)
+            with tab_bs:
+                if not df_multiyear.empty:
+                    fig_t_fcf = px.bar(
+                        df_multiyear,
+                        x="Fiscal Year",
+                        y=["Free Cash Flow ($M)", "Total Debt ($M)"],
+                        barmode="group",
+                        title=f"{selected_ticker} Free Cash Flow vs. Total Debt ($M)",
+                        color_discrete_sequence=["#00b0ff", "#ff5252"],
+                        template="plotly_dark",
+                        height=460
+                    )
+                    st.plotly_chart(fig_t_fcf, use_container_width=True)
 
-                fig_t_mar = px.line(
-                    df_multiyear,
-                    x="Fiscal Year",
-                    y=["Gross Margin Raw", "Op. Margin Raw"],
-                    markers=True,
-                    title=f"{selected_ticker} Margin Evolution Over Time (%)",
-                    color_discrete_sequence=["#ff9800", "#00e676"],
-                    template="plotly_dark",
-                    height=380
-                )
-                st.plotly_chart(fig_t_mar, use_container_width=True)
+        # RIGHT COLUMN: Dedicated Annual Chat Studio
+        with right_col:
+            col_c_hdr1, col_c_hdr2 = st.columns([3, 1])
+            with col_c_hdr1:
+                st.subheader(f"💬 {selected_ticker} Copilot")
+            with col_c_hdr2:
+                if st.button("🗑️ Reset", key=f"reset_chat_{selected_ticker}", help="Clear conversation history"):
+                    st.session_state[f"chat_history_{selected_ticker}"] = []
+                    st.rerun()
 
-        with tab_bs:
-            if not df_multiyear.empty:
-                fig_t_fcf = px.bar(
-                    df_multiyear,
-                    x="Fiscal Year",
-                    y=["Free Cash Flow ($M)", "Total Debt ($M)"],
-                    barmode="group",
-                    title=f"{selected_ticker} Free Cash Flow vs. Total Debt ($M)",
-                    color_discrete_sequence=["#00b0ff", "#ff5252"],
-                    template="plotly_dark",
-                    height=460
-                )
-                st.plotly_chart(fig_t_fcf, use_container_width=True)
+            st.caption(f"Grounded in {selected_ticker} Form 10-K Annual Disclosures.")
 
-    # RIGHT COLUMN: Dedicated Annual Chat Studio with proper [0] and [1] indexing
-    with right_col:
-        col_c_hdr1, col_c_hdr2 = st.columns([3, 1])
-        with col_c_hdr1:
-            st.subheader(f"💬 {selected_ticker} Copilot")
-        with col_c_hdr2:
-            if st.button("🗑️ Reset", key=f"reset_chat_{selected_ticker}", help="Clear conversation history"):
-                st.session_state[f"chat_history_{selected_ticker}"] = []
-                st.rerun()
+            chat_history_key = f"chat_history_{selected_ticker}"
+            if chat_history_key not in st.session_state:
+                st.session_state[chat_history_key] = [
+                    {
+                        "role": "assistant",
+                        "content": f"Hello! I am your Equity Research Copilot for **{selected_ticker}**. Ask me any question about multi-year revenue growth, gross/operating margins, balance sheet health, or Item 1A risk factors.",
+                        "citations": []
+                    }
+                ]
 
-        st.caption(f"Grounded in {selected_ticker} Form 10-K Annual Disclosures.")
+            # Dedicated Scrollable Container
+            deep_chat_container = st.container(height=430)
+            with deep_chat_container:
+                for msg in st.session_state[chat_history_key]:
+                    with st.chat_message(msg["role"]):
+                        st.markdown(msg["content"])
+                        if msg.get("citations"):
+                            with st.expander("📑 Audit Citations"):
+                                for cit in msg["citations"]:
+                                    st.markdown(f"**Page {cit['page_number']} [{cit['section']}]** *(Score: {cit['score']})*")
+                                    st.caption(cit["content_snippet"])
 
-        chat_history_key = f"chat_history_{selected_ticker}"
-        if chat_history_key not in st.session_state:
-            st.session_state[chat_history_key] = [
-                {
-                    "role": "assistant",
-                    "content": f"Hello! I am your Equity Research Copilot for **{selected_ticker}**. Ask me any question about multi-year revenue growth, gross/operating margins, balance sheet health, or Item 1A risk factors.",
-                    "citations": []
-                }
-            ]
+            # Dedicated In-Column Chat Form with Visible Input Box & Send Button
+            with st.form(key=f"deep_chat_form_{selected_ticker}", clear_on_submit=True):
+                d_cols = st.columns([5, 1])
+                with d_cols[0]:
+                    deep_prompt = st.text_input("Ask about financials...", label_visibility="collapsed", placeholder=f"Ask about {selected_ticker} annual revenue, margins, debt, risks...")
+                with d_cols[1]:
+                    submit_deep = st.form_submit_button("Send 💬", use_container_width=True)
 
-        # Dedicated Scrollable Container
-        deep_chat_container = st.container(height=430)
-        with deep_chat_container:
-            for msg in st.session_state[chat_history_key]:
-                with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
-                    if msg.get("citations"):
-                        with st.expander("📑 Audit Citations"):
-                            for cit in msg["citations"]:
-                                st.markdown(f"**{cit['ticker']} — Page {cit['page_number']} [{cit['section']}]** *(Score: {cit['score']})*")
-                                st.caption(cit["content_snippet"])
+                if submit_deep and deep_prompt:
+                    st.session_state[chat_history_key].append({"role": "user", "content": deep_prompt})
+                    with deep_chat_container:
+                        with st.chat_message("user"):
+                            st.markdown(deep_prompt)
+                        with st.chat_message("assistant"):
+                            with st.spinner(f"Retrieving {selected_ticker} 10-K disclosures & analyzing..."):
+                                qa = FinancialQAService()
+                                response = run_async_safe(qa.answer_question(question=deep_prompt, ticker=selected_ticker))
+                                st.markdown(response["answer"])
+                                if response.get("citations"):
+                                    with st.expander("📑 Audit Citations"):
+                                        for cit in response["citations"]:
+                                            st.markdown(f"**Page {cit['page_number']} [{cit['section']}]** *(Score: {cit['score']})*")
+                                            st.caption(cit["content_snippet"])
 
-        # Dedicated In-Column Chat Form with proper [0] and [1] indexing
-        with st.form(key=f"deep_chat_form_{selected_ticker}", clear_on_submit=True):
-            d_cols = st.columns([5, 1])
-            with d_cols[0]:
-                deep_prompt = st.text_input("Ask about financials...", label_visibility="collapsed", placeholder=f"Ask about {selected_ticker} annual revenue, margins, debt, risks...")
-            with d_cols[1]:
-                submit_deep = st.form_submit_button("Send 💬", use_container_width=True)
-
-            if submit_deep and deep_prompt:
-                st.session_state[chat_history_key].append({"role": "user", "content": deep_prompt})
-                with deep_chat_container:
-                    with st.chat_message("user"):
-                        st.markdown(deep_prompt)
-                    with st.chat_message("assistant"):
-                        with st.spinner(f"Retrieving {selected_ticker} 10-K disclosures & analyzing..."):
-                            qa = FinancialQAService()
-                            response = run_async_safe(qa.answer_question(question=deep_prompt, ticker=selected_ticker))
-                            st.markdown(response["answer"])
-                            if response.get("citations"):
-                                with st.expander("📑 Audit Citations"):
-                                    for cit in response["citations"]:
-                                        st.markdown(f"**{cit['ticker']} — Page {cit['page_number']} [{cit['section']}]** *(Score: {cit['score']})*")
-                                        st.caption(cit["content_snippet"])
-
-                            st.session_state[chat_history_key].append({
-                                "role": "assistant",
-                                "content": response["answer"],
-                                "citations": response.get("citations", [])
-                            })
-                st.rerun()
+                                st.session_state[chat_history_key].append({
+                                    "role": "assistant",
+                                    "content": response["answer"],
+                                    "citations": response.get("citations", [])
+                                })
+                    st.rerun()
