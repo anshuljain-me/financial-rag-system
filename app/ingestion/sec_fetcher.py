@@ -17,21 +17,22 @@ class SECFilingFetcher:
 
     def get_available_years(self, ticker: str) -> List[int]:
         ticker = ticker.upper()
-        stock = yf.Ticker(ticker)
-        
-        inc_df = stock.income_stmt
-        discovered_years = set()
-        
-        if inc_df is not None and not inc_df.empty:
-            for col in inc_df.columns:
-                if hasattr(col, "year"):
-                    discovered_years.add(col.year)
+        try:
+            stock = yf.Ticker(ticker)
+            inc_df = stock.income_stmt
+            discovered_years = set()
+            
+            if inc_df is not None and not inc_df.empty:
+                for col in inc_df.columns:
+                    if hasattr(col, "year"):
+                        discovered_years.add(col.year)
 
-        current_year = 2025
-        ten_year_range = list(range(current_year - 9, current_year + 1))
-
-        all_years = sorted(list(set(ten_year_range).union(discovered_years)), reverse=True)
-        return all_years[:10]
+            current_year = 2025
+            ten_year_range = list(range(current_year - 9, current_year + 1))
+            all_years = sorted(list(set(ten_year_range).union(discovered_years)), reverse=True)
+            return all_years[:10]
+        except Exception:
+            return list(range(2025, 2015, -1))
 
     def _safe_get(self, df: pd.DataFrame, row_name: str, col_idx: int = 0, divisor: float = 1e6) -> float:
         if df is None or df.empty:
@@ -48,15 +49,20 @@ class SECFilingFetcher:
 
     def generate_annual_filing_pdf_for_year(self, ticker: str, target_dir: Path, year: int) -> Path:
         ticker = ticker.upper()
-        stock = yf.Ticker(ticker)
+        try:
+            stock = yf.Ticker(ticker)
+            info = getattr(stock, "info", {}) or {}
+            inc_df = stock.income_stmt
+            bs_df = stock.balance_sheet
+            cf_df = stock.cashflow
+        except Exception:
+            info = {}
+            inc_df = None
+            bs_df = None
+            cf_df = None
         
-        info = getattr(stock, "info", {}) or {}
         company_name = info.get("longName") or info.get("shortName") or f"{ticker} Inc."
         business_summary = info.get("longBusinessSummary") or f"{company_name} operates globally across key commercial markets."
-        
-        inc_df = stock.income_stmt
-        bs_df = stock.balance_sheet
-        cf_df = stock.cashflow
 
         matched_idx = 0
         latest_date_str = f"December 31, {year}"
@@ -139,18 +145,16 @@ class SECFilingFetcher:
         doc.close()
         return target_path
 
-    def fetch_and_ingest_years_sync(self, ticker: str, selected_years: List[int]) -> List[Dict[str, Any]]:
-        """100% thread-safe synchronous multi-year ingestion for Streamlit."""
+    async def fetch_and_ingest_years(self, ticker: str, selected_years: List[int]) -> List[Dict[str, Any]]:
         ticker = ticker.upper()
         target_dir = Path("data/sample_filings")
         results = []
 
-        for yr in sorted(selected_years, reverse=True):
+        for idx, yr in enumerate(sorted(selected_years, reverse=True)):
             pdf_path = self.generate_annual_filing_pdf_for_year(ticker, target_dir, year=yr)
-            res = self.pipeline.process_file_sync(pdf_path, ticker_override=ticker)
+            res = await self.pipeline.process_file(pdf_path, ticker_override=ticker)
             results.append(res)
+            if idx < len(selected_years) - 1:
+                await asyncio.sleep(1.5)
 
         return results
-
-    async def fetch_and_ingest_years(self, ticker: str, selected_years: List[int]) -> List[Dict[str, Any]]:
-        return self.fetch_and_ingest_years_sync(ticker, selected_years)
