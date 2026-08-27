@@ -1,7 +1,7 @@
 import json
 import time
 import asyncio
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from google import genai
 from google.genai import types
 from sqlalchemy import select
@@ -13,12 +13,37 @@ from app.core.cache import semantic_cache
 
 settings = get_settings()
 
+def _fmt_money(val: Optional[float]) -> str:
+    if val is None:
+        return "N/A"
+    try:
+        v = float(val)
+        if abs(v) >= 1000:
+            return f"${v / 1000:,.2f}B"
+        return f"${v:,.0f}M"
+    except Exception:
+        return "N/A"
+
+def _fmt_pct(val: Optional[float]) -> str:
+    if val is None:
+        return "N/A"
+    try:
+        return f"{float(val):.1f}%"
+    except Exception:
+        return "N/A"
+
+def _fmt_ratio(val: Optional[float]) -> str:
+    if val is None:
+        return "N/A"
+    try:
+        return f"{float(val):.2f}x"
+    except Exception:
+        return "N/A"
+
 class FinancialQAService:
     """
     Enterprise Structured + Unstructured Hybrid Financial Reasoning Engine.
-    1. Cross-Company Comparative Queries: Queries structured database across ALL companies with explicit Fiscal Year transparency.
-    2. Qualitative Deep-Dive: Dense pgvector + Sparse BM25 via RRF.
-    3. Direct, executive-ready formatting with zero fluff.
+    100% Type-Safe & Null-Resilient.
     """
 
     MODEL_CASCADE = [
@@ -34,6 +59,7 @@ class FinancialQAService:
         self.client = genai.Client(api_key=settings.GEMINI_API_KEY.strip().strip("'").strip('"'))
 
     async def _fetch_all_companies_structured_metrics(self) -> List[Dict[str, Any]]:
+        """Fetches the latest annual metrics for every company in the database with full null-safety."""
         async with AsyncSessionLocal() as session:
             stmt = select(Company, Document, FinancialMetric).\
                 join(Document, Company.id == Document.company_id).\
@@ -49,17 +75,17 @@ class FinancialQAService:
                     latest_map[comp.ticker] = {
                         "ticker": comp.ticker,
                         "company_name": comp.company_name,
-                        "fiscal_year": doc.fiscal_year,
-                        "revenue_m": met.revenue or 0.0,
-                        "gross_margin_pct": met.gross_margin or 0.0,
-                        "operating_margin_pct": met.operating_margin or 0.0,
-                        "net_margin_pct": met.net_profit_margin or 0.0,
-                        "net_income_m": met.net_income or 0.0,
-                        "diluted_eps": met.diluted_eps or 0.0,
-                        "free_cash_flow_m": met.free_cash_flow or 0.0,
-                        "total_debt_m": met.total_debt or 0.0,
-                        "cash_m": met.total_cash_and_equivalents or 0.0,
-                        "debt_to_equity": met.debt_to_equity or 0.0
+                        "fiscal_year": doc.fiscal_year or 2025,
+                        "revenue_m": met.revenue,
+                        "gross_margin_pct": met.gross_margin,
+                        "operating_margin_pct": met.operating_margin,
+                        "net_margin_pct": met.net_profit_margin,
+                        "net_income_m": met.net_income,
+                        "diluted_eps": met.diluted_eps,
+                        "free_cash_flow_m": met.free_cash_flow,
+                        "total_debt_m": met.total_debt,
+                        "cash_m": met.total_cash_and_equivalents,
+                        "debt_to_equity": met.debt_to_equity
                     }
             return list(latest_map.values())
 
@@ -67,14 +93,22 @@ class FinancialQAService:
         start_time = time.perf_counter()
         target_ticker = None if ticker.upper() in ["ALL", "PORTFOLIO", ""] else ticker.upper()
 
-        cached_result = semantic_cache.get_semantic(query=question, ticker=ticker)
-        if cached_result:
-            payload, _ = cached_result
-            payload["latency_ms"] = round((time.perf_counter() - start_time) * 1000, 2)
-            return payload
+        # Step 0: Check Semantic Cache
+        try:
+            cached_lookup = semantic_cache.get_semantic(query=question, ticker=ticker)
+            if cached_lookup:
+                if isinstance(cached_lookup, tuple):
+                    payload = dict(cached_lookup[0])
+                else:
+                    payload = dict(cached_lookup)
+                payload["latency_ms"] = round((time.perf_counter() - start_time) * 1000, 2)
+                return payload
+        except Exception:
+            pass
 
         all_metrics = await self._fetch_all_companies_structured_metrics()
 
+        # Step 1: Execute Hybrid Search for Qualitative Text Context
         retrieved_chunks = await self.retriever.retrieve(query=question, ticker=target_ticker, top_k=top_k)
 
         citations_list = []
@@ -96,32 +130,38 @@ class FinancialQAService:
             })
             context_blocks.append(f"--- EXCERPT {idx} [{c_ticker} | Form 10-K | {section} | Page {page_num}] ---\n{chunk_text}")
 
+        # Format Null-Safe Structured Portfolio Metrics Table
         structured_portfolio_text = "PORTFOLIO FINANCIAL DATABASE (ALL INGESTED COMPANIES):\n"
         for m in all_metrics:
-            rev_str = f"${m['revenue_m']/1000:.2f}B" if m['revenue_m'] >= 1000 else f"${m['revenue_m']:,.0f}M"
-            net_str = f"${m['net_income_m']/1000:.2f}B" if abs(m['net_income_m']) >= 1000 else f"${m['net_income_m']:,.0f}M"
-            fcf_str = f"${m['free_cash_flow_m']/1000:.2f}B" if abs(m['free_cash_flow_m']) >= 1000 else f"${m['free_cash_flow_m']:,.0f}M"
+            rev_str = _fmt_money(m["revenue_m"])
+            net_str = _fmt_money(m["net_income_m"])
+            fcf_str = _fmt_money(m["free_cash_flow_m"])
+            gm_str = _fmt_pct(m["gross_margin_pct"])
+            om_str = _fmt_pct(m["operating_margin_pct"])
+            nm_str = _fmt_pct(m["net_margin_pct"])
+            de_str = _fmt_ratio(m["debt_to_equity"])
+
             structured_portfolio_text += (
-                f"* {m['ticker']} ({m['company_name']} - Fiscal Year: FY{m['fiscal_year']}): "
-                f"Revenue={rev_str}, Gross Margin={m['gross_margin_pct']:.1f}%, "
-                f"Op. Margin={m['operating_margin_pct']:.1f}%, Net Margin={m['net_margin_pct']:.1f}%, "
-                f"Net Income={net_str}, FCF={fcf_str}, Debt/Equity={m['debt_to_equity']:.2f}x\n"
+                f"* {m['ticker']} ({m['company_name']} - FY{m['fiscal_year']}): "
+                f"Revenue={rev_str}, Gross Margin={gm_str}, "
+                f"Op. Margin={om_str}, Net Margin={nm_str}, "
+                f"Net Income={net_str}, FCF={fcf_str}, Debt/Equity={de_str}\n"
             )
 
         narrative_context = "\n\n".join(context_blocks)
 
+        # Step 2: Clear, Direct Institutional Prompt
         system_prompt = f"""
 You are a Senior Equity Research Analyst & Portfolio Manager.
 
 CRITICAL COMMUNICATION GUIDELINES:
-1. ALWAYS GIVE A DIRECT ANSWER FIRST. State the direct conclusion in the very first sentence.
-2. FISCAL YEAR TRANSPARENCY:
-   - For all ranked entities, ALWAYS explicitly include the fiscal year in parentheses (e.g., '1. PLTR (Palantir - FY2025): 82.4%', '2. AAPL (Apple - FY2024): 46.2%').
-   - State clearly if comparing the 'Latest Reported Fiscal Year' across filings.
-3. For comparative/ranking queries:
-   - Examine ALL companies in the Portfolio Financial Database below (Apple, Alphabet, Tesla, Palantir, Microsoft, etc.).
-   - Provide a clean, compact ranked list.
-4. Conclude with a brief parenthetical citation (e.g. Form 10-K Item 8 / Item 1A).
+1. ALWAYS GIVE A DIRECT ANSWER FIRST. In the very first sentence, state the direct conclusion (name the specific company, its exact metric, and explicit fiscal year).
+2. For comparative or ranking questions (e.g. 'highest margin', 'highest revenue', 'compare companies'):
+   - Analyze ALL companies in the Portfolio Financial Database below (Apple, Alphabet, Tesla, Palantir, Microsoft, etc.).
+   - Explicitly state the fiscal year for each entity (e.g. PLTR [FY2025]: 82.4%, AAPL [FY2024]: 46.2%).
+   - Provide a clean, ranked comparison with exact numbers.
+3. DO NOT dump irrelevant walls of text or raw balance sheet lists. Keep the response concise, sharp, and institutional.
+4. Conclude with a brief parenthetical citation (e.g., Form 10-K Item 8 / Item 1A).
 
 {structured_portfolio_text}
 
@@ -134,6 +174,7 @@ CRITICAL COMMUNICATION GUIDELINES:
 Direct Institutional Response:
 """
 
+        # Step 3: Multi-Model Generation Cascade
         generated_answer = None
         for model_id in self.MODEL_CASCADE:
             for attempt in range(2):
@@ -169,5 +210,9 @@ Direct Institutional Response:
             "latency_ms": elapsed_ms
         }
 
-        semantic_cache.set_semantic(query=question, ticker=ticker, payload=response_payload)
+        try:
+            semantic_cache.set_semantic(query=question, ticker=ticker, payload=response_payload)
+        except Exception:
+            pass
+
         return response_payload
