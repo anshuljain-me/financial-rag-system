@@ -14,6 +14,7 @@ root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
+from app.core.auth import verify_credentials, verify_ingestion_passkey, ADMIN_INGESTION_KEY
 from app.ingestion.ticker_search import CompanyDirectorySearch
 from app.ingestion.sec_fetcher import SECFilingFetcher
 from app.rag.qa_engine import FinancialQAService
@@ -75,8 +76,66 @@ st.markdown("""
 <div id="top-anchor"></div>
 """, unsafe_allow_html=True)
 
+# ----------------- AUTHENTICATION GATEWAY -----------------
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+    st.session_state.user_role = "viewer"
+    st.session_state.username = "guest"
+    st.session_state.display_name = "Guest User"
+    st.session_state.ingestion_unlocked = False
+
+if not st.session_state.authenticated:
+    st.markdown("<div style='text-align: center; margin-top: 40px;'><h1>💎 Institutional Financial RAG</h1><p style='color: #8b95a5;'>Enterprise SEC Form 10-K Intelligence & Quantitative Research Platform</p></div>", unsafe_allow_html=True)
+    
+    col_l1, col_l2, col_l3 = st.columns([1, 1.4, 1])
+    with col_l2:
+        tab_login, tab_demo = st.tabs(["🔐 Secure Sign In", "⚡ 1-Click Demo Access"])
+        
+        with tab_login:
+            with st.form("login_form"):
+                st.subheader("Sign In")
+                username_input = st.text_input("Username", placeholder="e.g. admin or analyst")
+                password_input = st.text_input("Password", type="password", placeholder="Enter your password")
+                login_btn = st.form_submit_button("Authenticate 🚀", use_container_width=True)
+
+                if login_btn:
+                    auth_res = verify_credentials(username_input, password_input)
+                    if auth_res:
+                        u, role, d_name = auth_res
+                        st.session_state.authenticated = True
+                        st.session_state.username = u
+                        st.session_state.user_role = role
+                        st.session_state.display_name = d_name
+                        st.session_state.ingestion_unlocked = (role == "admin")
+                        st.success(f"Welcome back, {d_name}!")
+                        st.rerun()
+                    else:
+                        st.error("Invalid username or password. Please try again.")
+
+        with tab_demo:
+            st.info("Explore the platform with pre-indexed public companies and AI Copilot:")
+            d1, d2 = st.columns(2)
+            with d1:
+                if st.button("🚀 Explore as Analyst (Read-Only)", use_container_width=True):
+                    st.session_state.authenticated = True
+                    st.session_state.username = "analyst"
+                    st.session_state.user_role = "analyst"
+                    st.session_state.display_name = "Research Analyst"
+                    st.session_state.ingestion_unlocked = False
+                    st.rerun()
+            with d2:
+                if st.button("⚡ Login as Admin (Full Control)", use_container_width=True):
+                    st.session_state.authenticated = True
+                    st.session_state.username = "admin"
+                    st.session_state.user_role = "admin"
+                    st.session_state.display_name = "Portfolio Administrator"
+                    st.session_state.ingestion_unlocked = True
+                    st.rerun()
+
+    st.stop()
+
+# ----------------- APPLICATION LOGIC (AUTHENTICATED) -----------------
 def run_async_safe(coro):
-    """Executes asynchronous coroutines cleanly in an isolated event loop."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -85,7 +144,6 @@ def run_async_safe(coro):
         loop.close()
 
 def format_currency_smart(val_in_millions):
-    """Formats millions into readable $B or $M without truncation."""
     if val_in_millions is None or pd.isna(val_in_millions):
         return "N/A"
     val = float(val_in_millions)
@@ -95,7 +153,6 @@ def format_currency_smart(val_in_millions):
         return f"${val:,.0f}M"
 
 def get_all_companies_annual_data():
-    """Fetches ONLY annual 10-K filings across companies (strictly excluding 10-Qs)."""
     with SyncSessionLocal() as session:
         stmt = select(Company, Document, FinancialMetric).\
             join(Document, Company.id == Document.company_id).\
@@ -106,7 +163,6 @@ def get_all_companies_annual_data():
         return res
 
 def get_company_annual_history(ticker):
-    """Fetches clean chronological annual 10-K records and company name together."""
     with SyncSessionLocal() as session:
         stmt = select(Company, Document, FinancialMetric).\
             join(Document, Company.id == Document.company_id).\
@@ -128,54 +184,80 @@ def get_company_annual_history(ticker):
 all_filings_data = get_all_companies_annual_data()
 ticker_set = sorted(list(set([comp.ticker for comp, doc, met in all_filings_data]))) if all_filings_data else []
 
-# ----------------- SIDEBAR: NAVIGATION & INGESTION -----------------
+# ----------------- SIDEBAR: NAVIGATION, RBAC & INGESTION -----------------
 with st.sidebar:
     st.title("🏦 Financial RAG")
-    st.caption("AI-Powered SEC 10-K Equity Research Platform")
+    st.caption("Institutional SEC Form 10-K Intelligence Platform")
+    
+    # User Profile & Logout
+    u_role_badge = "👑 Admin" if st.session_state.user_role == "admin" else "📊 Analyst"
+    st.markdown(f"**👤 {st.session_state.display_name}** `({u_role_badge})`")
+    if st.button("🚪 Sign Out", key="logout_btn", use_container_width=True):
+        st.session_state.authenticated = False
+        st.session_state.ingestion_unlocked = False
+        st.rerun()
+
     st.markdown("---")
 
     view_mode = st.radio("Navigation View", ["📊 Portfolio Benchmark (Landing Page)", "🔍 Company Deep-Dive (Intelligence Studio)"])
 
     st.markdown("---")
-    st.subheader("⚡ Ingest SEC 10-K Company")
-    st.caption("Search across 10,000+ US public equities")
-    
-    search_query = st.text_input("🔍 Company Name or Ticker", value="", placeholder="Type e.g. Apple, Microsoft, Tesla...").strip()
-    
-    target_ticker = None
-    if search_query:
-        search_results = CompanyDirectorySearch.search(search_query, limit=12)
-        if search_results:
-            options_labels = [f"{item['ticker']} — {item['name']}" for item in search_results]
-            selected_option = st.selectbox("Matching SEC Filers:", options=options_labels, index=0)
-            target_ticker = selected_option.split(" — ")[0].strip()
-        else:
-            st.info(f"Direct ticker ingestion: '{search_query.upper()}'")
-            target_ticker = search_query.upper()
+    st.subheader("⚡ SEC 10-K Ingestion")
 
-    if target_ticker:
-        sec_fetcher = SECFilingFetcher()
-        available_years = sec_fetcher.get_available_years(target_ticker)
-        min_yr = min(available_years)
-        max_yr = max(available_years)
-        
-        st.markdown(f"**📅 Available 10-K Filings ({min_yr} – {max_yr}):**")
-        
-        selected_years = st.multiselect(
-            "Select Fiscal Years to Ingest:",
-            options=available_years,
-            default=available_years[:5],
-            help="Select one, several, or all 10 years to ingest."
-        )
+    # Ingestion RBAC Gatekeeper
+    can_ingest = (st.session_state.user_role == "admin") or st.session_state.ingestion_unlocked
 
-        if st.button(f"🚀 Ingest Selected 10-Ks ({len(selected_years)} Years)", use_container_width=True):
-            if selected_years:
-                with st.spinner(f"Pulling {len(selected_years)} annual 10-K filings for {target_ticker}..."):
-                    results = run_async_safe(sec_fetcher.fetch_and_ingest_years(target_ticker, selected_years))
-                    st.success(f"✅ Ingested {len(results)} annual filing(s) for {target_ticker} ({min(selected_years)}–{max(selected_years)})!")
+    if not can_ingest:
+        st.warning("🔒 **Ingestion Studio Locked (Admin Only)**")
+        st.caption("Analysts have read-only research access. Enter Admin Passkey to unlock live SEC indexing:")
+        with st.form("unlock_ingestion_form"):
+            entered_key = st.text_input("Ingestion Key", type="password", placeholder="Enter key...")
+            unlock_btn = st.form_submit_button("Unlock Ingestion 🔓", use_container_width=True)
+            if unlock_btn:
+                if verify_ingestion_passkey(entered_key):
+                    st.session_state.ingestion_unlocked = True
+                    st.success("✅ Ingestion Studio Unlocked!")
                     st.rerun()
+                else:
+                    st.error("Invalid Ingestion Passkey.")
+    else:
+        st.caption("Search across 10,000+ US public equities")
+        search_query = st.text_input("🔍 Company Name or Ticker", value="", placeholder="Type e.g. Apple, Microsoft, Tesla...").strip()
+        
+        target_ticker = None
+        if search_query:
+            search_results = CompanyDirectorySearch.search(search_query, limit=12)
+            if search_results:
+                options_labels = [f"{item['ticker']} — {item['name']}" for item in search_results]
+                selected_option = st.selectbox("Matching SEC Filers:", options=options_labels, index=0)
+                target_ticker = selected_option.split(" — ")[0].strip()
             else:
-                st.warning("Please select at least one fiscal year.")
+                st.info(f"Direct ticker ingestion: '{search_query.upper()}'")
+                target_ticker = search_query.upper()
+
+        if target_ticker:
+            sec_fetcher = SECFilingFetcher()
+            available_years = sec_fetcher.get_available_years(target_ticker)
+            min_yr = min(available_years)
+            max_yr = max(available_years)
+            
+            st.markdown(f"**📅 Available 10-K Filings ({min_yr} – {max_yr}):**")
+            
+            selected_years = st.multiselect(
+                "Select Fiscal Years to Ingest:",
+                options=available_years,
+                default=available_years[:5],
+                help="Select one, several, or all 10 years to ingest."
+            )
+
+            if st.button(f"🚀 Ingest Selected 10-Ks ({len(selected_years)} Years)", use_container_width=True):
+                if selected_years:
+                    with st.spinner(f"Pulling {len(selected_years)} annual 10-K filings for {target_ticker}..."):
+                        results = run_async_safe(sec_fetcher.fetch_and_ingest_years(target_ticker, selected_years))
+                        st.success(f"✅ Ingested {len(results)} annual filing(s) for {target_ticker} ({min(selected_years)}–{max(selected_years)})!")
+                        st.rerun()
+                else:
+                    st.warning("Please select at least one fiscal year.")
 
     st.markdown("---")
     st.caption("Active Database: Neon Serverless PostgreSQL (pgvector)")
@@ -190,7 +272,7 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
     st.caption("Side-by-side annual 10-K performance comparison across ingested public companies.")
 
     if not all_filings_data:
-        st.info("No companies ingested yet. Use the search box in the sidebar to ingest your first company.")
+        st.info("No companies ingested yet. Sign in as Admin to ingest your first company.")
     else:
         companies_name_map = {}
         for comp, doc, met in all_filings_data:
@@ -244,7 +326,6 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
         with ctrl_col3:
             chart_view_type = st.selectbox("📊 Chart Style", ["Horizontal Bars (Scales to 50+)", "2D Scatter Matrix (Bubble Chart)"])
 
-        # Filter records
         records = []
         for comp, doc, met in all_filings_data:
             if comp.ticker in selected_companies and doc.fiscal_year in active_years:
@@ -297,7 +378,6 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
             elif top_n_filter == "Top 10 by Op. Margin":
                 df_filtered = df_filtered.sort_values(by="Op. Margin Raw", ascending=False).head(10)
 
-            # Summary Table
             st.subheader(f"📌 Peer Benchmark Matrix ({len(selected_companies)} Companies, {len(active_years)} Fiscal Years)")
             st.dataframe(
                 df_filtered[[
@@ -409,7 +489,6 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
                                 st.markdown(f"**{cit['ticker']} — Page {cit['page_number']} [{cit['section']}]** *(Score: {cit['score']})*")
                                 st.caption(cit["content_snippet"])
 
-        # Dedicated Form Input to avoid auto-scrolling
         with st.form(key="port_chat_form", clear_on_submit=True):
             p_cols = st.columns([5, 1])
             with p_cols[0]:
@@ -487,13 +566,13 @@ else:
 
     df_multiyear = pd.DataFrame(timeline_records)
 
-    # 1. Sleek Header Banner
+    # 1. Header Banner
     year_range_str = f"{df_multiyear['Fiscal Year'].iloc[0]} – {df_multiyear['Fiscal Year'].iloc[-1]}" if not df_multiyear.empty else "FY2025"
 
     st.markdown(f"## 💎 {selected_ticker} — {company_name_resolved}")
     st.caption(f"Comprehensive SEC Form 10-K Equity Research & Analytics ({year_range_str})")
 
-    # 2. Executive Fundamental Scorecard (6 Cards with Clear Formatted Values)
+    # 2. Executive Scorecard
     if latest_metric:
         st.markdown(f"#### 📊 Latest Fiscal Position (FY{latest_doc.fiscal_year})")
         kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
@@ -512,7 +591,7 @@ else:
 
     st.markdown("---")
 
-    # 3. Clean Multi-Year Annual Statement Table
+    # 3. Multi-Year Table
     if not df_multiyear.empty:
         st.subheader("📅 Multi-Year Annual Financial Model Trajectory")
         st.dataframe(
@@ -524,7 +603,7 @@ else:
             use_container_width=True
         )
 
-    # 4. AI Strategic Overview Drawer
+    # 4. AI Strategic Overview
     if latest_doc and latest_doc.executive_summary:
         with st.expander(f"🤖 View AI Strategic Synthesis & Risk Factors (FY{latest_doc.fiscal_year})", expanded=False):
             st.write(latest_doc.executive_summary)
@@ -548,7 +627,7 @@ else:
 
     st.markdown("---")
 
-    # 5. SIDE-BY-SIDE SPLIT VIEW: Interactive Studio (Left) vs. Annual Copilot (Right)
+    # 5. SIDE-BY-SIDE SPLIT VIEW
     left_col, right_col = st.columns([1.1, 0.9])
 
     with left_col:
@@ -664,7 +743,7 @@ else:
                 )
                 st.plotly_chart(fig_t_fcf, use_container_width=True)
 
-    # RIGHT COLUMN: Dedicated Annual Chat Studio
+    # RIGHT COLUMN: Copilot
     with right_col:
         col_c_hdr1, col_c_hdr2 = st.columns([3, 1])
         with col_c_hdr1:
@@ -686,7 +765,6 @@ else:
                 }
             ]
 
-        # Dedicated Scrollable Container
         deep_chat_container = st.container(height=430)
         with deep_chat_container:
             for msg in st.session_state[chat_history_key]:
@@ -698,7 +776,6 @@ else:
                                 st.markdown(f"**Page {cit['page_number']} [{cit['section']}]** *(Score: {cit['score']})*")
                                 st.caption(cit["content_snippet"])
 
-        # Dedicated In-Column Chat Form with Visible Input Box & Send Button
         with st.form(key=f"deep_chat_form_{selected_ticker}", clear_on_submit=True):
             d_cols = st.columns([5, 1])
             with d_cols[0]:
