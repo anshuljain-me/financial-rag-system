@@ -1,5 +1,5 @@
 import os
-import re
+import urllib.parse
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
@@ -8,58 +8,71 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-def clean_asyncpg_url(url: str) -> str:
-    """
-    Cleans database URL specifically for asyncpg.
-    asyncpg strictly forbids 'sslmode' query parameter and requires 'ssl=require' or 'postgresql+asyncpg://'.
-    """
-    if not url:
+def clean_asyncpg_url(raw_url: str) -> str:
+    """Sanitizes database URL specifically for asyncpg driver."""
+    if not raw_url:
         return ""
-    
-    # 1. Ensure driver is postgresql+asyncpg://
-    if url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
-    elif url.startswith("postgresql://") and not url.startswith("postgresql+asyncpg://"):
-        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if raw_url.startswith("postgres://"):
+        raw_url = "postgresql+asyncpg://" + raw_url[len("postgres://"):]
+    elif raw_url.startswith("postgresql://") and not raw_url.startswith("postgresql+asyncpg://"):
+        raw_url = "postgresql+asyncpg://" + raw_url[len("postgresql://"):]
 
-    # 2. Replace sslmode= with ssl=
-    url = re.sub(r'sslmode=([a-zA-Z0-9_\-]+)', r'ssl=\1', url)
-    return url
+    parsed = urllib.parse.urlparse(raw_url)
+    query_params = urllib.parse.parse_qs(parsed.query)
 
-def clean_psycopg2_url(url: str) -> str:
-    """
-    Cleans database URL specifically for psycopg2 (synchronous driver).
-    psycopg2 requires 'postgresql://' and 'sslmode=require'.
-    """
-    if not url:
+    # asyncpg only supports 'ssl', never 'sslmode', 'channel_binding', or 'gssencmode'
+    cleaned_params = {}
+    for k, v in query_params.items():
+        if k == "sslmode":
+            val = v[0]
+            cleaned_params["ssl"] = ["require" if val in ["require", "verify-ca", "verify-full"] else val]
+        elif k == "ssl":
+            cleaned_params["ssl"] = v
+        elif k in ["channel_binding", "gssencmode"]:
+            continue
+        else:
+            cleaned_params[k] = v
+
+    if "ssl" not in cleaned_params and ("neon.tech" in parsed.netloc or "amazonaws.com" in parsed.netloc):
+        cleaned_params["ssl"] = ["require"]
+
+    new_query = urllib.parse.urlencode(cleaned_params, doseq=True)
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+
+def clean_psycopg2_url(raw_url: str) -> str:
+    """Sanitizes database URL specifically for psycopg2 driver."""
+    if not raw_url:
         return ""
+    if raw_url.startswith("postgresql+asyncpg://"):
+        raw_url = "postgresql://" + raw_url[len("postgresql+asyncpg://"):]
+    elif raw_url.startswith("postgres://"):
+        raw_url = "postgresql://" + raw_url[len("postgres://"):]
 
-    # 1. Ensure driver is postgresql://
-    if url.startswith("postgresql+asyncpg://"):
-        url = url.replace("postgresql+asyncpg://", "postgresql://", 1)
-    elif url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql://", 1)
+    parsed = urllib.parse.urlparse(raw_url)
+    query_params = urllib.parse.parse_qs(parsed.query)
 
-    # 2. Ensure sslmode is used instead of ssl
-    if "?ssl=require" in url:
-        url = url.replace("?ssl=require", "?sslmode=require")
-    elif "&ssl=require" in url:
-        url = url.replace("&ssl=require", "&sslmode=require")
-    elif "sslmode=" not in url and ("neon.tech" in url or "ssl=true" in url.lower()):
-        separator = "&" if "?" in url else "?"
-        url = f"{url}{separator}sslmode=require"
-        
-    return url
+    cleaned_params = {}
+    for k, v in query_params.items():
+        if k == "ssl":
+            val = v[0]
+            cleaned_params["sslmode"] = ["require" if val in ["require", "true", "1"] else val]
+        elif k == "sslmode":
+            cleaned_params["sslmode"] = v
+        elif k in ["channel_binding", "gssencmode"]:
+            continue
+        else:
+            cleaned_params[k] = v
 
-raw_async = settings.NEON_DB_ASYNC_URL or settings.DATABASE_URL or ""
-raw_sync = settings.NEON_DB_SYNC_URL or settings.SYNC_DATABASE_URL or settings.DATABASE_URL or ""
+    if "sslmode" not in cleaned_params and ("neon.tech" in parsed.netloc or "amazonaws.com" in parsed.netloc):
+        cleaned_params["sslmode"] = ["require"]
 
-cleaned_async_url = clean_asyncpg_url(raw_async)
-cleaned_sync_url = clean_psycopg2_url(raw_sync)
+    new_query = urllib.parse.urlencode(cleaned_params, doseq=True)
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
-# 1. Asynchronous Database Engine
+# 1. Async Database Engine (NullPool for thread-safe asynchronous operations)
+async_db_url = clean_asyncpg_url(settings.NEON_DB_ASYNC_URL or settings.DATABASE_URL)
 async_engine = create_async_engine(
-    cleaned_async_url,
+    async_db_url,
     poolclass=NullPool,
     echo=False
 )
@@ -70,9 +83,10 @@ AsyncSessionLocal = async_sessionmaker(
     expire_on_commit=False
 )
 
-# 2. Synchronous Database Engine
+# 2. Synchronous Database Engine (for Streamlit thread-safe reads)
+sync_db_url = clean_psycopg2_url(settings.NEON_DB_SYNC_URL or settings.SYNC_DATABASE_URL or settings.DATABASE_URL)
 sync_engine = create_engine(
-    cleaned_sync_url,
+    sync_db_url,
     poolclass=NullPool,
     echo=False
 )

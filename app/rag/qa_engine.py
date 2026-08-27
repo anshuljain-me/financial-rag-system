@@ -1,6 +1,7 @@
 import json
 import time
 import asyncio
+import re
 from typing import Dict, Any, List, Optional
 from google import genai
 from google.genai import types
@@ -16,7 +17,7 @@ settings = get_settings()
 class FinancialQAService:
     """
     Enterprise Structured + Unstructured Hybrid Financial Reasoning Engine
-    with Explicit Fiscal Year Normalization & 100% Type Safety.
+    with Explicit Fiscal Year Transparency & Normalization.
     """
 
     MODEL_CASCADE = [
@@ -31,27 +32,8 @@ class FinancialQAService:
         self.retriever = HybridRetriever()
         self.client = genai.Client(api_key=settings.GEMINI_API_KEY.strip().strip("'").strip('"'))
 
-    def _safe_fmt_currency(self, val_m) -> str:
-        if val_m is None:
-            return "N/A"
-        try:
-            v = float(val_m)
-            if abs(v) >= 1000:
-                return f"${v / 1000:.2f}B"
-            return f"${v:,.0f}M"
-        except Exception:
-            return "N/A"
-
-    def _safe_fmt_pct(self, val) -> str:
-        if val is None:
-            return "N/A"
-        try:
-            return f"{float(val):.1f}%"
-        except Exception:
-            return "N/A"
-
     async def _fetch_all_companies_structured_metrics(self) -> List[Dict[str, Any]]:
-        """Fetches the latest annual metrics for every company in the database."""
+        """Fetches annual metrics for every company in the database with explicit fiscal years."""
         async with AsyncSessionLocal() as session:
             stmt = select(Company, Document, FinancialMetric).\
                 join(Document, Company.id == Document.company_id).\
@@ -68,17 +50,16 @@ class FinancialQAService:
                         "ticker": comp.ticker,
                         "company_name": comp.company_name,
                         "fiscal_year": doc.fiscal_year,
-                        "fiscal_period": f"FY{doc.fiscal_year}",
-                        "revenue_m": met.revenue,
-                        "gross_margin_pct": met.gross_margin,
-                        "operating_margin_pct": met.operating_margin,
-                        "net_margin_pct": met.net_profit_margin,
-                        "net_income_m": met.net_income,
-                        "diluted_eps": met.diluted_eps,
-                        "free_cash_flow_m": met.free_cash_flow,
-                        "total_debt_m": met.total_debt,
-                        "cash_m": met.total_cash_and_equivalents,
-                        "debt_to_equity": met.debt_to_equity
+                        "revenue_m": met.revenue or 0.0,
+                        "gross_margin_pct": met.gross_margin or 0.0,
+                        "operating_margin_pct": met.operating_margin or 0.0,
+                        "net_margin_pct": met.net_profit_margin or 0.0,
+                        "net_income_m": met.net_income or 0.0,
+                        "diluted_eps": met.diluted_eps or 0.0,
+                        "free_cash_flow_m": met.free_cash_flow or 0.0,
+                        "total_debt_m": met.total_debt or 0.0,
+                        "cash_m": met.total_cash_and_equivalents or 0.0,
+                        "debt_to_equity": met.debt_to_equity or 0.0
                     }
             return list(latest_map.values())
 
@@ -117,38 +98,36 @@ class FinancialQAService:
             })
             context_blocks.append(f"--- EXCERPT {idx} [{c_ticker} | Form 10-K | {section} | Page {page_num}] ---\n{chunk_text}")
 
-        # Format clean, null-safe database scorecard
-        structured_portfolio_text = "PORTFOLIO FINANCIAL DATABASE (ALL INGESTED ANNUAL 10-Ks):\n"
+        # Format portfolio-wide accounting database with explicit Fiscal Year tag
+        structured_portfolio_text = "PORTFOLIO FINANCIAL DATABASE (ALL INGESTED COMPANIES):\n"
         for m in all_metrics:
-            rev_str = self._safe_fmt_currency(m['revenue_m'])
-            net_str = self._safe_fmt_currency(m['net_income_m'])
-            fcf_str = self._safe_fmt_currency(m['free_cash_flow_m'])
-            gm_str = self._safe_fmt_pct(m['gross_margin_pct'])
-            om_str = self._safe_fmt_pct(m['operating_margin_pct'])
-            nm_str = self._safe_fmt_pct(m['net_margin_pct'])
-            de_str = f"{m['debt_to_equity']:.2f}x" if m['debt_to_equity'] is not None else "N/A"
-
+            rev_str = f"${m['revenue_m']/1000:.2f}B" if m['revenue_m'] >= 1000 else f"${m['revenue_m']:,.0f}M"
+            net_str = f"${m['net_income_m']/1000:.2f}B" if abs(m['net_income_m']) >= 1000 else f"${m['net_income_m']:,.0f}M"
+            fcf_str = f"${m['free_cash_flow_m']/1000:.2f}B" if abs(m['free_cash_flow_m']) >= 1000 else f"${m['free_cash_flow_m']:,.0f}M"
             structured_portfolio_text += (
                 f"* {m['ticker']} ({m['company_name']} - FY{m['fiscal_year']}): "
-                f"Revenue={rev_str}, Gross Margin={gm_str}, "
-                f"Op. Margin={om_str}, Net Margin={nm_str}, "
-                f"Net Income={net_str}, FCF={fcf_str}, Debt/Equity={de_str}\n"
+                f"Revenue={rev_str}, Gross Margin={m['gross_margin_pct']:.1f}%, "
+                f"Op. Margin={m['operating_margin_pct']:.1f}%, Net Margin={m['net_margin_pct']:.1f}%, "
+                f"Net Income={net_str}, FCF={fcf_str}, Debt/Equity={m['debt_to_equity']:.2f}x\n"
             )
 
         narrative_context = "\n\n".join(context_blocks)
 
-        # Step 2: Strict Direct Institutional Prompt with Explicit Fiscal Year Tagging
+        # Step 2: Direct Institutional Communication Prompt
         system_prompt = f"""
-You are a Lead Equity Research Analyst and CFA Charterholder.
+You are a Senior Equity Research Analyst & Portfolio Manager.
 
-CRITICAL INSTRUCTIONS:
-1. DIRECT ANSWER FIRST: In the very first sentence, state the direct conclusion (name the winning company, its exact metric, and its specific Fiscal Year, e.g. 'Palantir (PLTR - FY2025)').
+CRITICAL INSTITUTIONAL REPORTING RULES:
+1. ALWAYS STATE THE DIRECT CONCLUSION IN THE FIRST SENTENCE:
+   - Name the top-ranking company, its exact metric, and its specific fiscal year (e.g., "**Palantir Technologies (PLTR)** has the highest gross margin at **82.4% (FY2025)**").
 2. EXPLICIT FISCAL YEAR TRANSPARENCY:
-   - Always state the exact Fiscal Year (e.g. FY2025, FY2024) for EVERY company mentioned so the analyst knows which period is being compared.
-   - When ranking or comparing, check ALL companies in the Portfolio Financial Database below (Apple, Alphabet, Tesla, Palantir, Microsoft, Verisign, etc.).
-   - Present a clean, numbered ranking list showing: Rank. TICKER (Company - FYXXXX): X.X%.
-3. CONCISE & INSTITUTIONAL: Do not dump unnecessary raw balance sheet walls of text. Keep it sharp and executive-ready.
-4. Conclude with a brief parenthetical citation (e.g., Form 10-K Item 8 / Item 1A).
+   - For every ranked company, ALWAYS explicitly state its specific reporting fiscal year in parentheses (e.g. `PLTR (Palantir - FY2025): 82.4%`, `AAPL (Apple - FY2024): 46.2%`).
+   - If different companies have different latest fiscal years (e.g. FY2024 vs FY2025), explicitly note that this comparison reflects the **Latest Reported Form 10-K Annual Filings**.
+3. INCLUDE ALL INGESTED PORTFOLIO COMPANIES:
+   - Always analyze all companies in the Portfolio Financial Database below (do not omit Palantir, Tesla, Apple, Alphabet, Microsoft, Verisign, etc.).
+4. CONCISE & INSTITUTIONAL:
+   - Provide a clean numbered ranking. Avoid dumping unrelated balance sheet numbers unless specifically asked.
+5. Conclude with a brief citation reference (e.g., Form 10-K Item 8 / Item 1A).
 
 {structured_portfolio_text}
 
