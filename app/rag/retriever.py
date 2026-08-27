@@ -1,38 +1,34 @@
 import math
-import asyncio
+import time
 from typing import List, Dict, Any, Optional
 from sqlalchemy import select, and_
 from rank_bm25 import BM25Okapi
-from app.core.database import AsyncSessionLocal
-from app.models.domain import DocumentChunk, Document
+from app.core.database import SyncSessionLocal
+from app.models.domain import DocumentChunk
 from app.rag.embedder import FinancialEmbedder
 
 class HybridRetriever:
     """
-    Hybrid Search Engine strictly retrieving Annual Form 10-K Disclosures:
-    1. Dense Vector Cosine Similarity (pgvector 768-dim embeddings)
-    2. Sparse BM25 Keyword Search
-    3. Reciprocal Rank Fusion (RRF) for robust multi-modal retrieval.
+    100% Thread-Safe Synchronous Hybrid Search Engine:
+    Combines dense pgvector cosine similarity with sparse BM25 keyword search via RRF.
+    Zero asyncio event-loop dependency for complete stability on Streamlit Cloud.
     """
 
     def __init__(self, k_rrf: int = 60):
         self.embedder = FinancialEmbedder()
         self.k_rrf = k_rrf
 
-    async def retrieve(
+    def retrieve_sync(
         self,
         query: str,
         ticker: Optional[str] = None,
         section: Optional[str] = None,
         top_k: int = 6
     ) -> List[Dict[str, Any]]:
-        async with AsyncSessionLocal() as session:
-            # Strictly filter to 10-K documents to prevent mixing with old quarterly test data
-            stmt = select(DocumentChunk, Document).\
-                join(Document, DocumentChunk.document_id == Document.id).\
-                where(Document.form_type == "10-K")
-
+        with SyncSessionLocal() as session:
+            stmt = select(DocumentChunk)
             filters = []
+            
             if ticker and ticker.upper() not in ["ALL", "PORTFOLIO", ""]:
                 filters.append(DocumentChunk.ticker == ticker.upper())
             if section:
@@ -41,18 +37,15 @@ class HybridRetriever:
             if filters:
                 stmt = stmt.where(and_(*filters))
 
-            stmt = stmt.limit(250)
-            res = await session.execute(stmt)
-            rows = res.all()
+            stmt = stmt.limit(300)
+            chunks = session.execute(stmt).scalars().all()
 
-        if not rows:
+        if not chunks:
             return []
 
-        chunks_with_doc = [(chunk, doc) for chunk, doc in rows]
-        chunks = [c for c, d in chunks_with_doc]
-
-        # 1. Dense Semantic Retrieval
+        # 1. Dense Semantic Retrieval (Vector Cosine Distance)
         query_embedding = self.embedder.embed_query(query)
+        
         dense_candidates = []
         for c in chunks:
             if c.embedding is not None:
@@ -65,7 +58,7 @@ class HybridRetriever:
 
         dense_ranked = [c for c, _ in sorted(dense_candidates, key=lambda x: x[1], reverse=True)]
 
-        # 2. Sparse Lexical Retrieval (BM25)
+        # 2. Sparse Lexical Retrieval (BM25 Keyword Matching)
         chunk_texts = [getattr(c, "content", getattr(c, "chunk_text", "")) or "" for c in chunks]
         tokenized_corpus = [t.lower().split() if t else [""] for t in chunk_texts]
         bm25 = BM25Okapi(tokenized_corpus)
@@ -75,10 +68,9 @@ class HybridRetriever:
         sparse_candidates = [(chunks[i], bm25_scores[i]) for i in range(len(chunks))]
         sparse_ranked = [c for c, _ in sorted(sparse_candidates, key=lambda x: x[1], reverse=True)]
 
-        # 3. Reciprocal Rank Fusion
+        # 3. Reciprocal Rank Fusion (RRF)
         rrf_scores = {}
         chunk_map = {}
-        doc_map = {c.id: d for c, d in chunks_with_doc}
 
         for rank, chunk in enumerate(dense_ranked):
             chunk_map[chunk.id] = chunk
@@ -93,15 +85,11 @@ class HybridRetriever:
         results = []
         for cid in sorted_chunk_ids:
             chunk = chunk_map[cid]
-            doc = doc_map.get(cid)
             c_text = getattr(chunk, "content", getattr(chunk, "chunk_text", "")) or ""
-            fy_str = f"FY{doc.fiscal_year}" if doc and doc.fiscal_year else "10-K"
             results.append({
                 "id": str(chunk.id),
                 "ticker": chunk.ticker,
-                "fiscal_year": doc.fiscal_year if doc else None,
-                "fiscal_period": fy_str,
-                "section": chunk.section or "Item 8",
+                "section": chunk.section or "SEC Disclosures",
                 "page_number": chunk.page_number or 1,
                 "chunk_text": c_text,
                 "content": c_text,
@@ -109,6 +97,15 @@ class HybridRetriever:
             })
 
         return results
+
+    async def retrieve(
+        self,
+        query: str,
+        ticker: Optional[str] = None,
+        section: Optional[str] = None,
+        top_k: int = 6
+    ) -> List[Dict[str, Any]]:
+        return self.retrieve_sync(query, ticker, section, top_k)
 
 FinancialHybridRetriever = HybridRetriever
 HybridSearchRetriever = HybridRetriever
