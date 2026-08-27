@@ -1,6 +1,8 @@
 import os
 import json
 import logging
+import asyncio
+import math
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from sqlalchemy import select, and_
@@ -14,6 +16,31 @@ from app.rag.embedder import FinancialEmbedder
 
 logger = logging.getLogger(__name__)
 
+
+def _clean_text(value: Any, default: str = "", max_length: Optional[int] = None) -> str:
+    if value is None:
+        value = default
+    if isinstance(value, (list, dict)):
+        value = json.dumps(value)
+    cleaned = str(value).strip()
+    if not cleaned:
+        cleaned = default
+    if max_length:
+        cleaned = cleaned[:max_length]
+    return cleaned
+
+
+def _clean_float(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        cleaned = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(cleaned) or math.isinf(cleaned):
+        return None
+    return cleaned
+
 class IngestionPipeline:
     """
     Robust Production SEC Filing Ingestion & Vector Indexing Pipeline.
@@ -24,6 +51,9 @@ class IngestionPipeline:
         self.parser = StructureAwarePDFParser()
         self.extractor = FinancialExtractor()
         self.embedder = FinancialEmbedder()
+
+    def process_file_sync(self, pdf_path: Path, ticker_override: Optional[str] = None) -> Dict[str, Any]:
+        return asyncio.run(self.process_file(pdf_path, ticker_override=ticker_override))
 
     async def process_file(self, pdf_path: Path, ticker_override: Optional[str] = None) -> Dict[str, Any]:
         pdf_path = Path(pdf_path)
@@ -42,10 +72,10 @@ class IngestionPipeline:
         ratios = extracted["calculated_ratios"]
         summary = extracted["summary"]
 
-        ticker = (ticker_override or kpis.get("ticker") or "UNKNOWN").upper().strip()
-        company_name = kpis.get("company_name") or f"{ticker} Inc."
+        ticker = _clean_text(ticker_override or kpis.get("ticker"), "UNKNOWN", 10).upper()
+        company_name = _clean_text(kpis.get("company_name"), f"{ticker} Inc.", 255)
         fiscal_year = int(kpis.get("fiscal_year") or 2025)
-        fiscal_period = kpis.get("fiscal_period") or f"FY{fiscal_year}"
+        fiscal_period = _clean_text(kpis.get("fiscal_period"), f"FY{fiscal_year}", 20)
         form_type = "10-K" if "10-K" in pdf_path.name or "FY" in fiscal_period else "10-Q"
 
         async with AsyncSessionLocal() as session:
@@ -84,9 +114,9 @@ class IngestionPipeline:
                 fiscal_year=fiscal_year,
                 fiscal_period=fiscal_period,
                 file_hash=file_hash,
-                executive_summary=summary.get("executive_summary", ""),
-                key_risks=json.dumps(summary.get("key_risks", [])) if isinstance(summary.get("key_risks"), (list, dict)) else summary.get("key_risks", "[]"),
-                growth_catalysts=json.dumps(summary.get("growth_catalysts", [])) if isinstance(summary.get("growth_catalysts"), (list, dict)) else summary.get("growth_catalysts", "[]")
+                executive_summary=_clean_text(summary.get("executive_summary")),
+                key_risks=_clean_text(summary.get("key_risks"), "[]"),
+                growth_catalysts=_clean_text(summary.get("growth_catalysts"), "[]")
             )
             session.add(doc)
             await session.flush()
@@ -94,21 +124,21 @@ class IngestionPipeline:
             # 6. Create FinancialMetric Record
             metric = FinancialMetric(
                 document_id=doc.id,
-                revenue=kpis.get("revenue"),
-                gross_profit=kpis.get("gross_profit"),
-                operating_income=kpis.get("operating_income"),
-                net_income=kpis.get("net_income"),
-                diluted_eps=kpis.get("diluted_eps"),
-                operating_cash_flow=kpis.get("operating_cash_flow"),
-                capital_expenditures=kpis.get("capital_expenditures"),
-                free_cash_flow=ratios.get("free_cash_flow"),
-                total_cash_and_equivalents=kpis.get("total_cash_and_equivalents"),
-                total_debt=kpis.get("total_debt"),
-                shareholders_equity=kpis.get("shareholders_equity"),
-                gross_margin=ratios.get("gross_margin"),
-                operating_margin=ratios.get("operating_margin"),
-                net_profit_margin=ratios.get("net_profit_margin"),
-                debt_to_equity=ratios.get("debt_to_equity")
+                revenue=_clean_float(kpis.get("revenue")),
+                gross_profit=_clean_float(kpis.get("gross_profit")),
+                operating_income=_clean_float(kpis.get("operating_income")),
+                net_income=_clean_float(kpis.get("net_income")),
+                diluted_eps=_clean_float(kpis.get("diluted_eps")),
+                operating_cash_flow=_clean_float(kpis.get("operating_cash_flow")),
+                capital_expenditures=_clean_float(kpis.get("capital_expenditures")),
+                free_cash_flow=_clean_float(ratios.get("free_cash_flow")),
+                total_cash_and_equivalents=_clean_float(kpis.get("total_cash_and_equivalents")),
+                total_debt=_clean_float(kpis.get("total_debt")),
+                shareholders_equity=_clean_float(kpis.get("shareholders_equity")),
+                gross_margin=_clean_float(ratios.get("gross_margin")),
+                operating_margin=_clean_float(ratios.get("operating_margin")),
+                net_profit_margin=_clean_float(ratios.get("net_profit_margin")),
+                debt_to_equity=_clean_float(ratios.get("debt_to_equity"))
             )
             session.add(metric)
 
@@ -123,8 +153,8 @@ class IngestionPipeline:
                 chunk = DocumentChunk(
                     document_id=doc.id,
                     ticker=ticker,
-                    section=c.get("section", "SEC Disclosures"),
-                    chunk_type=c.get("type", "text"),
+                    section=_clean_text(c.get("section"), "SEC Disclosures", 50),
+                    chunk_type=_clean_text(c.get("type"), "text", 20),
                     content=raw_content,
                     page_number=c.get("page", 1),
                     chunk_index=c.get("chunk_index", 0),

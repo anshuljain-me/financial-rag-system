@@ -153,4 +153,13 @@ class SECFilingFetcher:
         return results
 
     async def fetch_and_ingest_years(self, ticker: str, selected_years: List[int]) -> List[Dict[str, Any]]:
-        return self.fetch_and_ingest_years_sync(ticker, selected_years)
+        ticker = ticker.upper()
+        target_dir = Path("data/sample_filings")
+        results = []
+
+        for yr in sorted(selected_years, reverse=True):
+            pdf_path = self.generate_annual_filing_pdf_for_year(ticker, target_dir, year=yr)
+            res = await self.pipeline.process_file(pdf_path, ticker_override=ticker)
+            results.append(res)
+
+        return results

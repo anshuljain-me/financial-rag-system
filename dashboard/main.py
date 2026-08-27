@@ -18,9 +18,11 @@ from app.ingestion.ticker_search import CompanyDirectorySearch
 from app.ingestion.sec_fetcher import SECFilingFetcher
 from app.rag.qa_engine import FinancialQAService
 from app.analytics.technical import TechnicalAnalysisEngine
-from app.core.database import SyncSessionLocal
+from app.core.database import SyncSessionLocal, ensure_database_ready
 from app.models.domain import Company, Document, FinancialMetric
 from sqlalchemy import select, and_
+
+ensure_database_ready()
 
 # Configure Page Layout & Title
 st.set_page_config(
