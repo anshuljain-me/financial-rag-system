@@ -45,6 +45,7 @@ class IngestionPipeline:
         if not pdf_path.exists():
             raise FileNotFoundError(f"File not found: {pdf_path}")
 
+        # Ensure all tables exist
         Base.metadata.create_all(bind=sync_engine)
 
         file_hash = compute_sha256(pdf_path)
@@ -175,6 +176,7 @@ class IngestionPipeline:
                 if chunks_to_add:
                     session.add_all(chunks_to_add)
 
+                # Commit Transaction
                 session.commit()
 
                 return {
@@ -192,4 +194,5 @@ class IngestionPipeline:
                 raise e
 
     async def process_file(self, pdf_path: Path, ticker_override: Optional[str] = None) -> Dict[str, Any]:
+        """Async compatibility wrapper."""
         return self.process_file_sync(pdf_path, ticker_override)
