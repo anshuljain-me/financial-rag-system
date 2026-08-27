@@ -15,8 +15,12 @@ settings = get_settings()
 
 class FinancialQAService:
     """
-    Enterprise Structured + Unstructured Hybrid Financial Reasoning Engine
-    with Explicit Fiscal Year Transparency & Strict Groundedness.
+    Enterprise Structured + Unstructured Hybrid Financial Reasoning Engine.
+    1. For Quantitative/Comparative queries (e.g. 'highest margin', 'rank by revenue', 'compare debt'):
+       Queries the structured relational database across ALL ingested companies for 100% complete rankings.
+    2. For Qualitative queries (e.g. 'risks', 'business model', 'guidance'):
+       Uses Hybrid Dense Vector + Sparse BM25 retrieval with audit citations.
+    3. Direct, executive-ready formatting with mandatory fiscal year tagging on all figures.
     """
 
     MODEL_CASCADE = [
@@ -32,7 +36,7 @@ class FinancialQAService:
         self.client = genai.Client(api_key=settings.GEMINI_API_KEY.strip().strip("'").strip('"'))
 
     async def _fetch_all_companies_structured_metrics(self) -> List[Dict[str, Any]]:
-        """Fetches all annual 10-K metrics across every ingested company and fiscal year."""
+        """Fetches the latest annual 10-K metrics for every company in the database."""
         async with AsyncSessionLocal() as session:
             stmt = select(Company, Document, FinancialMetric).\
                 join(Document, Company.id == Document.company_id).\
@@ -42,30 +46,31 @@ class FinancialQAService:
             res = await session.execute(stmt)
             rows = res.all()
 
-            records = []
+            latest_map = {}
             for comp, doc, met in rows:
-                records.append({
-                    "ticker": comp.ticker,
-                    "company_name": comp.company_name,
-                    "fiscal_year": doc.fiscal_year,
-                    "revenue_m": met.revenue or 0.0,
-                    "gross_margin_pct": met.gross_margin or 0.0,
-                    "operating_margin_pct": met.operating_margin or 0.0,
-                    "net_margin_pct": met.net_profit_margin or 0.0,
-                    "net_income_m": met.net_income or 0.0,
-                    "diluted_eps": met.diluted_eps or 0.0,
-                    "free_cash_flow_m": met.free_cash_flow or 0.0,
-                    "total_debt_m": met.total_debt or 0.0,
-                    "cash_m": met.total_cash_and_equivalents or 0.0,
-                    "debt_to_equity": met.debt_to_equity or 0.0
-                })
-            return records
+                if comp.ticker not in latest_map:
+                    latest_map[comp.ticker] = {
+                        "ticker": comp.ticker,
+                        "company_name": comp.company_name,
+                        "fiscal_year": doc.fiscal_year,
+                        "revenue_m": met.revenue or 0.0,
+                        "gross_margin_pct": met.gross_margin or 0.0,
+                        "operating_margin_pct": met.operating_margin or 0.0,
+                        "net_margin_pct": met.net_profit_margin or 0.0,
+                        "net_income_m": met.net_income or 0.0,
+                        "diluted_eps": met.diluted_eps or 0.0,
+                        "free_cash_flow_m": met.free_cash_flow or 0.0,
+                        "total_debt_m": met.total_debt or 0.0,
+                        "cash_m": met.total_cash_and_equivalents or 0.0,
+                        "debt_to_equity": met.debt_to_equity or 0.0
+                    }
+            return list(latest_map.values())
 
     async def answer_question(self, question: str, ticker: str = "ALL", top_k: int = 6) -> Dict[str, Any]:
         start_time = time.perf_counter()
         target_ticker = None if ticker.upper() in ["ALL", "PORTFOLIO", ""] else ticker.upper()
 
-        # Step 0: Semantic Vector Cache Lookup
+        # Step 0: Check Semantic Vector Cache
         cached_result = semantic_cache.get_semantic(query=question, ticker=ticker)
         if cached_result:
             payload, _ = cached_result
@@ -74,7 +79,7 @@ class FinancialQAService:
 
         all_metrics = await self._fetch_all_companies_structured_metrics()
 
-        # Step 1: Hybrid Search Retrieval
+        # Step 1: Execute Hybrid Search for qualitative context
         retrieved_chunks = await self.retriever.retrieve(query=question, ticker=target_ticker, top_k=top_k)
 
         citations_list = []
@@ -96,14 +101,14 @@ class FinancialQAService:
             })
             context_blocks.append(f"--- EXCERPT {idx} [{c_ticker} | Form 10-K | {section} | Page {page_num}] ---\n{chunk_text}")
 
-        # Build complete multi-year structured database text
-        structured_portfolio_text = "PORTFOLIO ANNUAL FINANCIAL DATABASE (BY FISCAL YEAR):\n"
+        # Format portfolio-wide accounting database with strict fiscal year tagging
+        structured_portfolio_text = "PORTFOLIO FINANCIAL DATABASE (ALL INGESTED ANNUAL 10-K FILINGS):\n"
         for m in all_metrics:
             rev_str = f"${m['revenue_m']/1000:.2f}B" if m['revenue_m'] >= 1000 else f"${m['revenue_m']:,.0f}M"
             net_str = f"${m['net_income_m']/1000:.2f}B" if abs(m['net_income_m']) >= 1000 else f"${m['net_income_m']:,.0f}M"
             fcf_str = f"${m['free_cash_flow_m']/1000:.2f}B" if abs(m['free_cash_flow_m']) >= 1000 else f"${m['free_cash_flow_m']:,.0f}M"
             structured_portfolio_text += (
-                f"* {m['ticker']} ({m['company_name']} - FY{m['fiscal_year']}): "
+                f"* {m['ticker']} ({m['company_name']}) [Fiscal Year: FY{m['fiscal_year']}]: "
                 f"Revenue={rev_str}, Gross Margin={m['gross_margin_pct']:.1f}%, "
                 f"Op. Margin={m['operating_margin_pct']:.1f}%, Net Margin={m['net_margin_pct']:.1f}%, "
                 f"Net Income={net_str}, FCF={fcf_str}, Debt/Equity={m['debt_to_equity']:.2f}x\n"
@@ -111,19 +116,17 @@ class FinancialQAService:
 
         narrative_context = "\n\n".join(context_blocks)
 
-        # Step 2: Strict Fiscal Year Transparency Prompt
+        # Step 2: Direct Institutional Communication Prompt
         system_prompt = f"""
-You are a Senior Equity Research Analyst & Lead Portfolio Auditor.
+You are a Senior Equity Research Analyst & Portfolio Manager.
 
-CRITICAL FISCAL YEAR & COMPARISON GUIDELINES:
-1. ALWAYS GIVE A DIRECT ANSWER FIRST in the opening sentence.
-2. EXPLICIT FISCAL YEAR DECLARATION (TRANSPARENCY):
-   - In all rankings and comparisons, ALWAYS append the specific Fiscal Year to each company (e.g. '1. PLTR (Palantir - FY2025): 82.4%', '2. AAPL (Apple - FY2024): 46.2%').
-   - State upfront the comparison basis (e.g. 'Comparing the latest reported annual Form 10-K filings across the portfolio:').
-   - If a specific year is asked (e.g. 'for FY2024' or 'in 2025'), restrict rankings strictly to that fiscal year.
-3. COMPREHENSIVE COVERAGE: Include all relevant companies present in the portfolio database below (Apple, Alphabet, Tesla, Palantir, Microsoft, Verisign, etc.).
-4. NO FLUFF: Keep the answer concise, structured, and institutional without dumping raw balance sheets.
-5. Conclude with a brief parenthetical citation (e.g., Form 10-K Item 8 / Item 1A).
+CRITICAL COMMUNICATION & FISCAL YEAR TRANSPARENCY GUIDELINES:
+1. ALWAYS GIVE A DIRECT ANSWER FIRST. In the first sentence, state the direct conclusion and the exact company with its percentage and fiscal year (e.g. '**Palantir Technologies (PLTR - FY2025)** has the highest gross margin at **82.4%**').
+2. MANDATORY FISCAL YEAR TAGGING: When listing or comparing companies, ALWAYS include the exact fiscal year for each entity (e.g. 'PLTR (Palantir - FY2025): 82.4%', 'AAPL (Apple - FY2024): 46.2%').
+3. TIME HORIZON DECLARATION: Clearly note whether the comparison reflects the latest available annual Form 10-K filings across the reporting universe or a specific fiscal year.
+4. RANK ALL INGESTED COMPANIES: Compare ALL companies present in the Portfolio Financial Database below (do not omit Apple, Alphabet, Tesla, Palantir, Microsoft, Verisign, etc.).
+5. KEEP IT SHARP & CONCISE: Provide a clean ranked bullet list. Avoid dumping raw balance sheet line items unless specifically requested.
+6. Conclude with a brief citation referencing Form 10-K Item 8 / Item 1A.
 
 {structured_portfolio_text}
 

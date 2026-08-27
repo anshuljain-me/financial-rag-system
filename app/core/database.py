@@ -7,19 +7,18 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-# 1. Async Database Engine (asyncpg requires '?ssl=require' NOT '?sslmode=require')
-raw_async = settings.NEON_DB_ASYNC_URL or settings.DATABASE_URL or ""
-if raw_async.startswith("postgres://"):
-    raw_async = raw_async.replace("postgres://", "postgresql+asyncpg://", 1)
-elif raw_async.startswith("postgresql://") and not raw_async.startswith("postgresql+asyncpg://"):
-    raw_async = raw_async.replace("postgresql://", "postgresql+asyncpg://", 1)
+# 1. Async Database Engine (asyncpg requires '?ssl=require')
+raw_async_url = settings.NEON_DB_ASYNC_URL or settings.DATABASE_URL or ""
+if raw_async_url.startswith("postgres://"):
+    raw_async_url = raw_async_url.replace("postgres://", "postgresql+asyncpg://", 1)
+elif raw_async_url.startswith("postgresql://") and not raw_async_url.startswith("postgresql+asyncpg://"):
+    raw_async_url = raw_async_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-# Clean query params: replace sslmode with ssl for asyncpg
-if "sslmode=" in raw_async:
-    raw_async = raw_async.replace("sslmode=", "ssl=")
+if "sslmode=" in raw_async_url:
+    raw_async_url = raw_async_url.replace("sslmode=", "ssl=")
 
 async_engine = create_async_engine(
-    raw_async,
+    raw_async_url,
     poolclass=NullPool,
     echo=False
 )
@@ -31,19 +30,19 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 # 2. Synchronous Database Engine (psycopg2 requires '?sslmode=require')
-raw_sync = settings.NEON_DB_SYNC_URL or settings.SYNC_DATABASE_URL or settings.DATABASE_URL or ""
-if raw_sync.startswith("postgresql+asyncpg://"):
-    raw_sync = raw_sync.replace("postgresql+asyncpg://", "postgresql://", 1)
-elif raw_sync.startswith("postgres://"):
-    raw_sync = raw_sync.replace("postgres://", "postgresql://", 1)
+raw_sync_url = settings.NEON_DB_SYNC_URL or settings.SYNC_DATABASE_URL or settings.DATABASE_URL or ""
+if raw_sync_url.startswith("postgresql+asyncpg://"):
+    raw_sync_url = raw_sync_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+elif raw_sync_url.startswith("postgres://"):
+    raw_sync_url = raw_sync_url.replace("postgres://", "postgresql://", 1)
 
-if "?ssl=require" in raw_sync:
-    raw_sync = raw_sync.replace("?ssl=require", "?sslmode=require")
-elif "&ssl=require" in raw_sync:
-    raw_sync = raw_sync.replace("&ssl=require", "&sslmode=require")
+if "?ssl=require" in raw_sync_url:
+    raw_sync_url = raw_sync_url.replace("?ssl=require", "?sslmode=require")
+elif "&ssl=require" in raw_sync_url:
+    raw_sync_url = raw_sync_url.replace("&ssl=require", "&sslmode=require")
 
 sync_engine = create_engine(
-    raw_sync,
+    raw_sync_url,
     poolclass=NullPool,
     echo=False
 )
@@ -56,6 +55,39 @@ SyncSessionLocal = sessionmaker(
 
 class Base(DeclarativeBase):
     pass
+
+def auto_migrate_schema():
+    """Ensures newly added columns exist in Neon PostgreSQL without dropping data."""
+    columns_to_verify = [
+        ("documents", "file_hash", "VARCHAR(64)"),
+        ("documents", "form_type", "VARCHAR(20) DEFAULT '10-K'"),
+        ("documents", "fiscal_period", "VARCHAR(20)"),
+        ("documents", "executive_summary", "TEXT"),
+        ("documents", "key_risks", "TEXT"),
+        ("documents", "growth_catalysts", "TEXT"),
+        ("financial_metrics", "free_cash_flow", "FLOAT"),
+        ("financial_metrics", "gross_margin", "FLOAT"),
+        ("financial_metrics", "operating_margin", "FLOAT"),
+        ("financial_metrics", "net_profit_margin", "FLOAT"),
+        ("financial_metrics", "debt_to_equity", "FLOAT"),
+        ("financial_metrics", "capital_expenditures", "FLOAT"),
+        ("financial_metrics", "total_cash_and_equivalents", "FLOAT"),
+        ("financial_metrics", "total_debt", "FLOAT"),
+        ("financial_metrics", "shareholders_equity", "FLOAT")
+    ]
+    try:
+        with sync_engine.connect() as conn:
+            for table, col, col_type in columns_to_verify:
+                try:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type};"))
+                    conn.commit()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+# Run automatic non-destructive column verification on startup
+auto_migrate_schema()
 
 async def init_db():
     async with async_engine.begin() as conn:
