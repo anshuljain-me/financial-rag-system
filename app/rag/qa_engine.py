@@ -1,6 +1,7 @@
 import json
 import time
 import asyncio
+import re
 from typing import Dict, Any, List, Optional
 from google import genai
 from google.genai import types
@@ -15,8 +16,8 @@ settings = get_settings()
 
 class FinancialQAService:
     """
-    Enterprise Structured + Unstructured Hybrid Financial Reasoning Engine.
-    Enforces explicit fiscal year tagging across all rankings.
+    Enterprise Structured + Unstructured Hybrid Financial Reasoning Engine
+    with Explicit Fiscal Period Transparency and Normalization.
     """
 
     MODEL_CASCADE = [
@@ -32,7 +33,6 @@ class FinancialQAService:
         self.client = genai.Client(api_key=settings.GEMINI_API_KEY.strip().strip("'").strip('"'))
 
     async def _fetch_all_companies_structured_metrics(self) -> List[Dict[str, Any]]:
-        """Fetches the latest annual metrics for every company in the database."""
         async with AsyncSessionLocal() as session:
             stmt = select(Company, Document, FinancialMetric).\
                 join(Document, Company.id == Document.company_id).\
@@ -49,6 +49,7 @@ class FinancialQAService:
                         "ticker": comp.ticker,
                         "company_name": comp.company_name,
                         "fiscal_year": doc.fiscal_year,
+                        "fiscal_period": f"FY{doc.fiscal_year}",
                         "revenue_m": met.revenue or 0.0,
                         "gross_margin_pct": met.gross_margin or 0.0,
                         "operating_margin_pct": met.operating_margin or 0.0,
@@ -62,6 +63,12 @@ class FinancialQAService:
                     }
             return list(latest_map.values())
 
+    def _extract_target_year_if_specified(self, question: str) -> Optional[int]:
+        match = re.search(r'\b(201[6-9]|202[0-6])\b', question)
+        if match:
+            return int(match.group(1))
+        return None
+
     async def answer_question(self, question: str, ticker: str = "ALL", top_k: int = 6) -> Dict[str, Any]:
         start_time = time.perf_counter()
         target_ticker = None if ticker.upper() in ["ALL", "PORTFOLIO", ""] else ticker.upper()
@@ -73,6 +80,8 @@ class FinancialQAService:
             return payload
 
         all_metrics = await self._fetch_all_companies_structured_metrics()
+        target_year = self._extract_target_year_if_specified(question)
+
         retrieved_chunks = await self.retriever.retrieve(query=question, ticker=target_ticker, top_k=top_k)
 
         citations_list = []
@@ -94,7 +103,9 @@ class FinancialQAService:
             })
             context_blocks.append(f"--- EXCERPT {idx} [{c_ticker} | Form 10-K | {section} | Page {page_num}] ---\n{chunk_text}")
 
-        structured_portfolio_text = "PORTFOLIO FINANCIAL DATABASE (ALL INGESTED COMPANIES):\n"
+        time_basis = f"Normalized Fiscal Year {target_year}" if target_year else "Latest Reported Annual 10-K Disclosures"
+        structured_portfolio_text = f"PORTFOLIO FINANCIAL DATABASE ({time_basis}):\n"
+        
         for m in all_metrics:
             rev_str = f"${m['revenue_m']/1000:.2f}B" if m['revenue_m'] >= 1000 else f"${m['revenue_m']:,.0f}M"
             net_str = f"${m['net_income_m']/1000:.2f}B" if abs(m['net_income_m']) >= 1000 else f"${m['net_income_m']:,.0f}M"
@@ -109,15 +120,15 @@ class FinancialQAService:
         narrative_context = "\n\n".join(context_blocks)
 
         system_prompt = f"""
-You are a Senior Equity Research Analyst & Portfolio Manager.
+You are a Senior Equity Research Analyst & CFA Charterholder.
 
-CRITICAL COMMUNICATION GUIDELINES:
-1. ALWAYS GIVE A DIRECT ANSWER FIRST. State the direct winner and its exact fiscal year and percentage in the very first sentence.
-2. For comparative or ranking questions (e.g. 'highest margin', 'highest revenue', 'compare companies'):
-   - Look at ALL companies in the Portfolio Financial Database below (Palantir, Apple, Alphabet, Verisign, Tesla, etc.).
-   - ALWAYS explicitly include the fiscal year in parentheses for EVERY company in the ranking (e.g., '1. PLTR (Palantir - FY2025): 82.4%', '2. AAPL (Apple - FY2024): 46.2%').
-   - State upfront: 'Comparing the Latest Reported 10-K Filings:' or specify the exact fiscal year analyzed.
-3. DO NOT dump irrelevant walls of text or raw balance sheet lists. Keep the response concise, sharp, and institutional.
+MANDATORY REPORTING & FISCAL TRANSPARENCY GUIDELINES:
+1. ALWAYS GIVE A DIRECT ANSWER FIRST in the very first sentence. Explicitly name the winning company, its exact metric, and its SPECIFIC FISCAL YEAR (e.g. 'Palantir (PLTR - FY2025) has the highest gross margin at 82.4%').
+2. In any comparative ranking or list:
+   - YOU MUST EXPLICITLY ANNOTATE EVERY COMPANY WITH ITS EXACT FISCAL YEAR (e.g., '1. PLTR (Palantir - FY2025): 82.4%', '2. AAPL (Apple - FY2024): 46.2%').
+   - State upfront the comparison basis: '{time_basis}'.
+   - Include ALL companies from the Portfolio Financial Database below (Apple, Alphabet, Tesla, Palantir, Microsoft, Verisign, etc.).
+3. DO NOT dump irrelevant walls of text. Keep it concise, high-signal, and institutional.
 4. Conclude with a brief parenthetical citation (e.g., Form 10-K Item 8 / Item 1A).
 
 {structured_portfolio_text}
@@ -128,7 +139,7 @@ CRITICAL COMMUNICATION GUIDELINES:
 [USER QUESTION]:
 {question}
 
-Direct Institutional Response:
+Direct Institutional Response (With Explicit Fiscal Year Tags):
 """
 
         generated_answer = None

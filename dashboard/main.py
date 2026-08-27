@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
+import asyncio
 import os
 import sys
 import json
@@ -74,7 +75,17 @@ st.markdown("""
 <div id="top-anchor"></div>
 """, unsafe_allow_html=True)
 
+def run_async_safe(coro):
+    """Executes asynchronous coroutines cleanly in an isolated event loop."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
 def format_currency_smart(val_in_millions):
+    """Formats millions into readable $B or $M without truncation."""
     if val_in_millions is None or pd.isna(val_in_millions):
         return "N/A"
     val = float(val_in_millions)
@@ -84,6 +95,7 @@ def format_currency_smart(val_in_millions):
         return f"${val:,.0f}M"
 
 def get_all_companies_annual_data():
+    """Fetches ONLY annual 10-K filings across companies (strictly excluding 10-Qs)."""
     with SyncSessionLocal() as session:
         stmt = select(Company, Document, FinancialMetric).\
             join(Document, Company.id == Document.company_id).\
@@ -94,6 +106,7 @@ def get_all_companies_annual_data():
         return res
 
 def get_company_annual_history(ticker):
+    """Fetches clean chronological annual 10-K records and company name together."""
     with SyncSessionLocal() as session:
         stmt = select(Company, Document, FinancialMetric).\
             join(Document, Company.id == Document.company_id).\
@@ -158,7 +171,10 @@ with st.sidebar:
         if st.button(f"🚀 Ingest Selected 10-Ks ({len(selected_years)} Years)", use_container_width=True):
             if selected_years:
                 with st.spinner(f"Pulling {len(selected_years)} annual 10-K filings for {target_ticker}..."):
-                    results = sec_fetcher.fetch_and_ingest_years_sync(target_ticker, selected_years)
+                    if hasattr(sec_fetcher, "fetch_and_ingest_years_sync"):
+                        results = sec_fetcher.fetch_and_ingest_years_sync(target_ticker, selected_years)
+                    else:
+                        results = run_async_safe(sec_fetcher.fetch_and_ingest_years(target_ticker, selected_years))
                     st.success(f"✅ Ingested {len(results)} annual filing(s) for {target_ticker} ({min(selected_years)}–{max(selected_years)})!")
                     st.rerun()
             else:
@@ -376,7 +392,7 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
 
         st.markdown("---")
 
-        # Global Portfolio Copilot (Synchronous Execution)
+        # Global Portfolio Copilot
         st.subheader("💬 Portfolio Financial Copilot (Cross-Company Q&A)")
         st.caption("Ask comparative questions across all ingested annual 10-K reports.")
 
@@ -394,6 +410,7 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
                                 st.markdown(f"**{cit['ticker']} — Page {cit['page_number']} [{cit['section']}]** *(Score: {cit['score']})*")
                                 st.caption(cit["content_snippet"])
 
+        # Dedicated Form Input to avoid auto-scrolling
         with st.form(key="port_chat_form", clear_on_submit=True):
             p_cols = st.columns([5, 1])
             with p_cols[0]:
@@ -409,7 +426,7 @@ if view_mode == "📊 Portfolio Benchmark (Landing Page)":
                     with st.chat_message("assistant"):
                         with st.spinner("Analyzing annual 10-K SEC filings..."):
                             qa = FinancialQAService()
-                            res = qa.answer_question_sync(question=portfolio_prompt, ticker="ALL")
+                            res = run_async_safe(qa.answer_question(question=portfolio_prompt, ticker="ALL"))
                             st.markdown(res["answer"])
                             if res.get("citations"):
                                 with st.expander("📑 Source SEC Citations"):
@@ -477,7 +494,7 @@ else:
     st.markdown(f"## 💎 {selected_ticker} — {company_name_resolved}")
     st.caption(f"Comprehensive SEC Form 10-K Equity Research & Analytics ({year_range_str})")
 
-    # 2. Executive Fundamental Scorecard
+    # 2. Executive Fundamental Scorecard (6 Cards with Clear Formatted Values)
     if latest_metric:
         st.markdown(f"#### 📊 Latest Fiscal Position (FY{latest_doc.fiscal_year})")
         kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
@@ -532,7 +549,7 @@ else:
 
     st.markdown("---")
 
-    # 5. SIDE-BY-SIDE SPLIT VIEW
+    # 5. SIDE-BY-SIDE SPLIT VIEW: Interactive Studio (Left) vs. Annual Copilot (Right)
     left_col, right_col = st.columns([1.1, 0.9])
 
     with left_col:
@@ -648,7 +665,7 @@ else:
                 )
                 st.plotly_chart(fig_t_fcf, use_container_width=True)
 
-    # RIGHT COLUMN: Dedicated Annual Chat Studio (Synchronous Execution)
+    # RIGHT COLUMN: Dedicated Annual Chat Studio
     with right_col:
         col_c_hdr1, col_c_hdr2 = st.columns([3, 1])
         with col_c_hdr1:
@@ -696,7 +713,7 @@ else:
                     with st.chat_message("assistant"):
                         with st.spinner(f"Retrieving {selected_ticker} 10-K disclosures & analyzing..."):
                             qa = FinancialQAService()
-                            response = qa.answer_question_sync(question=deep_prompt, ticker=selected_ticker)
+                            response = run_async_safe(qa.answer_question(question=deep_prompt, ticker=selected_ticker))
                             st.markdown(response["answer"])
                             if response.get("citations"):
                                 with st.expander("📑 Audit Citations"):

@@ -10,7 +10,6 @@ class SECFilingFetcher:
     """
     10-Year Annual SEC 10-K Filing Generator & Extractor:
     Discovers available historical years and extracts real financial statements.
-    Provides both async and synchronous execution helpers for Streamlit.
     """
 
     def __init__(self):
@@ -99,7 +98,6 @@ class SECFilingFetcher:
 
         doc = fitz.open()
 
-        # Page 1: Cover & Item 1 Business
         p1 = doc.new_page()
         p1.insert_text((50, 45), "UNITED STATES SECURITIES AND EXCHANGE COMMISSION", fontsize=13)
         p1.insert_text((50, 70), "FORM 10-K - ANNUAL REPORT", fontsize=12)
@@ -107,7 +105,6 @@ class SECFilingFetcher:
         p1.insert_text((50, 130), "ITEM 1. BUSINESS", fontsize=12)
         p1.insert_textbox(fitz.Rect(50, 150, 550, 360), business_summary[:1200], fontsize=10)
 
-        # Page 2: Item 1A Risk Factors
         p2 = doc.new_page()
         p2.insert_text((50, 45), "ITEM 1A. RISK FACTORS & MD&A", fontsize=12)
         risk_text = (
@@ -117,7 +114,6 @@ class SECFilingFetcher:
         )
         p2.insert_textbox(fitz.Rect(50, 70, 550, 350), risk_text, fontsize=10)
 
-        # Page 3: Item 8 Consolidated Statements
         p3 = doc.new_page()
         p3.insert_text((50, 45), f"ITEM 8. CONSOLIDATED STATEMENTS OF OPERATIONS ({fiscal_period})", fontsize=12)
         fin_text = (
@@ -155,10 +151,15 @@ class SECFilingFetcher:
         return results
 
     def fetch_and_ingest_years_sync(self, ticker: str, selected_years: List[int]) -> List[Dict[str, Any]]:
-        """Synchronous wrapper for Streamlit execution."""
+        """Synchronous wrapper for fetch_and_ingest_years."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             return loop.run_until_complete(self.fetch_and_ingest_years(ticker, selected_years))
         finally:
             loop.close()
+
+    async def fetch_and_ingest(self, ticker: str) -> Dict[str, Any]:
+        target_dir = Path("data/sample_filings")
+        pdf_path = self.generate_annual_filing_pdf_for_year(ticker, target_dir, year=2025)
+        return await self.pipeline.process_file(pdf_path, ticker_override=ticker.upper())
