@@ -1,7 +1,6 @@
 import json
 import time
 import asyncio
-import re
 from typing import Dict, Any, List, Optional
 from google import genai
 from google.genai import types
@@ -16,13 +15,8 @@ settings = get_settings()
 
 class FinancialQAService:
     """
-    Enterprise Structured + Unstructured Hybrid Financial Reasoning Engine.
-    1. For Quantitative/Comparative queries:
-       Queries structured PostgreSQL data across ALL ingested companies and explicitly tags fiscal years.
-    2. For Qualitative queries:
-       Uses Hybrid Dense Vector + Sparse BM25 retrieval with audit citations.
-    3. Explicit Fiscal Year Transparency:
-       Always declares exact reporting period (e.g. FY2025, FY2024) next to every single company.
+    Enterprise Structured + Unstructured Hybrid Financial Reasoning Engine
+    with Explicit Fiscal Period Normalization & Precision.
     """
 
     MODEL_CASCADE = [
@@ -104,7 +98,6 @@ class FinancialQAService:
             })
             context_blocks.append(f"--- EXCERPT {idx} [{c_ticker} | Form 10-K | {section} | Page {page_num}] ---\n{chunk_text}")
 
-        # Format portfolio-wide accounting database with strict FY tags
         structured_portfolio_text = "PORTFOLIO FINANCIAL DATABASE (ALL INGESTED ANNUAL 10-K FILINGS):\n"
         for m in all_metrics:
             rev_str = f"${m['revenue_m']/1000:.2f}B" if m['revenue_m'] >= 1000 else f"${m['revenue_m']:,.0f}M"
@@ -119,20 +112,17 @@ class FinancialQAService:
 
         narrative_context = "\n\n".join(context_blocks)
 
-        # Step 2: Direct Institutional Communication Prompt
         system_prompt = f"""
 You are a Senior Equity Research Analyst & CFA Charterholder.
 
-CRITICAL COMMUNICATION GUIDELINES:
-1. ALWAYS GIVE A DIRECT ANSWER FIRST. In the very first sentence, state the direct conclusion (name the specific company, its exact fiscal year, and its exact metric).
-2. FISCAL YEAR TRANSPARENCY:
-   - In any ranking or comparison, ALWAYS explicitly print the fiscal year next to each company (e.g. '1. PLTR (Palantir - FY2025): 82.4%', '2. AAPL (Apple - FY2024): 46.2%').
-   - State upfront if the ranking compares 'Latest Reported Fiscal Years' or a specific single fiscal year.
-3. For comparative questions (e.g. 'highest margin', 'highest revenue', 'compare companies'):
-   - Compare ALL companies in the Portfolio Financial Database below (Palantir, Apple, Alphabet, Verisign, Tesla, Microsoft, etc.).
-   - Provide a clean, ranked comparison list with exact numbers and fiscal years.
-4. Keep the response sharp, concise, and institutional without unnecessary filler.
-5. Conclude with a brief parenthetical citation (e.g. Form 10-K Item 8 / Item 1A).
+CRITICAL INSTITUTIONAL GUIDELINES:
+1. ALWAYS GIVE A DIRECT ANSWER FIRST. In the very first sentence, state the direct conclusion (name the winning company, its exact metric, and its specific fiscal year).
+2. For comparative or ranking questions (e.g. 'highest margin', 'highest revenue', 'compare companies'):
+   - Explicitly tag every company with its specific fiscal year on each line (e.g. '1. PLTR (Palantir - FY2025): 82.4%', '2. AAPL (Apple - FY2024): 46.2%').
+   - State the comparison scope upfront (e.g. 'Comparing the latest reported Form 10-K filings across the portfolio:').
+   - Evaluate ALL ingested entities in the database (Apple, Alphabet, Tesla, Palantir, Microsoft, etc.).
+3. DO NOT dump irrelevant walls of text or raw balance sheet tables. Keep the response concise, sharp, and institutional.
+4. Conclude with a brief parenthetical citation (e.g., Form 10-K Item 8 / Item 1A).
 
 {structured_portfolio_text}
 
@@ -145,7 +135,6 @@ CRITICAL COMMUNICATION GUIDELINES:
 Direct Institutional Response:
 """
 
-        # Step 3: Multi-Model Generation
         generated_answer = None
         for model_id in self.MODEL_CASCADE:
             for attempt in range(2):
