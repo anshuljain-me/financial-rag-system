@@ -25,13 +25,13 @@ class SECFilingFetcher:
         if inc_df is not None and not inc_df.empty:
             for col in inc_df.columns:
                 if hasattr(col, "year"):
-                    discovered_years.add(col.year)
+                    discovered_years.add(int(col.year))
 
         current_year = 2025
         ten_year_range = list(range(current_year - 9, current_year + 1))
 
         all_years = sorted(list(set(ten_year_range).union(discovered_years)), reverse=True)
-        return all_years[:10]
+        return [int(y) for y in all_years[:10]]
 
     def _safe_get(self, df: pd.DataFrame, row_name: str, col_idx: int = 0, divisor: float = 1e6) -> float:
         if df is None or df.empty:
@@ -39,15 +39,24 @@ class SECFilingFetcher:
         for index_label in df.index:
             if row_name.lower() in str(index_label).lower():
                 try:
-                    val = df.loc[index_label].iloc[col_idx]
+                    val = df.loc[index_label]
+                    if hasattr(val, "iloc"):
+                        val = val.iloc[col_idx]
+                    if hasattr(val, "iloc"):
+                        val = val.iloc[0]
+
                     if pd.notna(val):
-                        return round(abs(float(val)) / divisor if "capex" in row_name.lower() or "capital" in row_name.lower() else float(val) / divisor, 2)
+                        val_float = float(val)
+                        if "capex" in row_name.lower() or "capital" in row_name.lower():
+                            val_float = abs(val_float)
+                        return round(val_float / divisor, 2)
                 except Exception:
                     pass
         return 0.0
 
-    def generate_annual_filing_pdf_for_year(self, ticker: str, target_dir: Path, year: int) -> Path:
+    def generate_annual_filing_pdf_for_year(self, ticker: str, target_dir: Path, year: Any) -> Path:
         ticker = ticker.upper()
+        year_int = int(year)
         stock = yf.Ticker(ticker)
         
         info = getattr(stock, "info", {}) or {}
@@ -59,40 +68,40 @@ class SECFilingFetcher:
         cf_df = stock.cashflow
 
         matched_idx = 0
-        latest_date_str = f"December 31, {year}"
+        latest_date_str = f"December 31, {year_int}"
         
         if inc_df is not None and not inc_df.empty:
             for idx, col in enumerate(inc_df.columns):
-                if hasattr(col, "year") and col.year == year:
+                if hasattr(col, "year") and int(col.year) == year_int:
                     matched_idx = idx
                     latest_date_str = col.strftime("%B %d, %Y")
                     break
 
-        decay_factor = (1.0 - (2025 - year) * 0.08) if year < 2025 else 1.0
+        decay_factor = (1.0 - (2025 - year_int) * 0.08) if year_int < 2025 else 1.0
         decay_factor = max(decay_factor, 0.4)
 
         raw_rev = self._safe_get(inc_df, "Total Revenue", matched_idx) or self._safe_get(inc_df, "Operating Revenue", matched_idx)
-        revenue = round((raw_rev or 100000) * (decay_factor if matched_idx == 0 and year < 2024 else 1.0), 2)
+        revenue = round((raw_rev or 100000) * (decay_factor if matched_idx == 0 and year_int < 2024 else 1.0), 2)
         
         raw_cogs = self._safe_get(inc_df, "Cost Of Revenue", matched_idx)
-        cogs = round((raw_cogs or revenue * 0.55) * (decay_factor if matched_idx == 0 and year < 2024 else 1.0), 2)
+        cogs = round((raw_cogs or revenue * 0.55) * (decay_factor if matched_idx == 0 and year_int < 2024 else 1.0), 2)
         gross_profit = round(revenue - cogs, 2)
         
         raw_op = self._safe_get(inc_df, "Operating Income", matched_idx) or self._safe_get(inc_df, "EBIT", matched_idx)
-        operating_income = round((raw_op or revenue * 0.28) * (decay_factor if matched_idx == 0 and year < 2024 else 1.0), 2)
+        operating_income = round((raw_op or revenue * 0.28) * (decay_factor if matched_idx == 0 and year_int < 2024 else 1.0), 2)
         
         raw_net = self._safe_get(inc_df, "Net Income", matched_idx)
-        net_income = round((raw_net or revenue * 0.22) * (decay_factor if matched_idx == 0 and year < 2024 else 1.0), 2)
+        net_income = round((raw_net or revenue * 0.22) * (decay_factor if matched_idx == 0 and year_int < 2024 else 1.0), 2)
         
         diluted_eps = round((self._safe_get(inc_df, "Diluted EPS", matched_idx, divisor=1.0) or 4.50) * decay_factor, 2)
-        operating_cash_flow = round((self._safe_get(cf_df, "Operating Cash Flow", matched_idx) or (net_income * 1.18)) * (decay_factor if matched_idx == 0 and year < 2024 else 1.0), 2)
-        capex = round((self._safe_get(cf_df, "Capital Expenditure", matched_idx) or (revenue * 0.06)) * (decay_factor if matched_idx == 0 and year < 2024 else 1.0), 2)
+        operating_cash_flow = round((self._safe_get(cf_df, "Operating Cash Flow", matched_idx) or (net_income * 1.18)) * (decay_factor if matched_idx == 0 and year_int < 2024 else 1.0), 2)
+        capex = round((self._safe_get(cf_df, "Capital Expenditure", matched_idx) or (revenue * 0.06)) * (decay_factor if matched_idx == 0 and year_int < 2024 else 1.0), 2)
         
-        cash = round((self._safe_get(bs_df, "Cash And Cash Equivalents", matched_idx) or (revenue * 0.18)) * (decay_factor if matched_idx == 0 and year < 2024 else 1.0), 2)
-        total_debt = round((self._safe_get(bs_df, "Total Debt", matched_idx) or (revenue * 0.25)) * (decay_factor if matched_idx == 0 and year < 2024 else 1.0), 2)
-        equity = round((self._safe_get(bs_df, "Stockholders Equity", matched_idx) or (revenue * 0.35)) * (decay_factor if matched_idx == 0 and year < 2024 else 1.0), 2)
+        cash = round((self._safe_get(bs_df, "Cash And Cash Equivalents", matched_idx) or (revenue * 0.18)) * (decay_factor if matched_idx == 0 and year_int < 2024 else 1.0), 2)
+        total_debt = round((self._safe_get(bs_df, "Total Debt", matched_idx) or (revenue * 0.25)) * (decay_factor if matched_idx == 0 and year_int < 2024 else 1.0), 2)
+        equity = round((self._safe_get(bs_df, "Stockholders Equity", matched_idx) or (revenue * 0.35)) * (decay_factor if matched_idx == 0 and year_int < 2024 else 1.0), 2)
 
-        fiscal_period = f"FY{year}"
+        fiscal_period = f"FY{year_int}"
         target_path = target_dir / f"{ticker}_{fiscal_period}_10K.pdf"
         target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -102,7 +111,7 @@ class SECFilingFetcher:
         p1 = doc.new_page()
         p1.insert_text((50, 45), "UNITED STATES SECURITIES AND EXCHANGE COMMISSION", fontsize=13)
         p1.insert_text((50, 70), "FORM 10-K - ANNUAL REPORT", fontsize=12)
-        p1.insert_text((50, 95), f"Company: {company_name} | Ticker: {ticker} | Fiscal Year: {year} (Ended {latest_date_str})", fontsize=11)
+        p1.insert_text((50, 95), f"Company: {company_name} | Ticker: {ticker} | Fiscal Year: {year_int} (Ended {latest_date_str})", fontsize=11)
         p1.insert_text((50, 130), "ITEM 1. BUSINESS", fontsize=12)
         p1.insert_textbox(fitz.Rect(50, 150, 550, 360), business_summary[:1200], fontsize=10)
 
@@ -110,8 +119,8 @@ class SECFilingFetcher:
         p2 = doc.new_page()
         p2.insert_text((50, 45), "ITEM 1A. RISK FACTORS & MD&A", fontsize=12)
         risk_text = (
-            f"For fiscal year {year}, operational execution was shaped by macroeconomic conditions, cost of capital, and technological transitions. "
-            f"Key risk considerations for {ticker} during {year} included capital expenditure allocation, supply chain management, "
+            f"For fiscal year {year_int}, operational execution was shaped by macroeconomic conditions, cost of capital, and technological transitions. "
+            f"Key risk considerations for {ticker} during {year_int} included capital expenditure allocation, supply chain management, "
             f"intellectual property protection, and regulatory compliance standards across key international jurisdictions."
         )
         p2.insert_textbox(fitz.Rect(50, 70, 550, 350), risk_text, fontsize=10)
@@ -139,17 +148,18 @@ class SECFilingFetcher:
         doc.close()
         return target_path
 
-    async def fetch_and_ingest_years(self, ticker: str, selected_years: List[int]) -> List[Dict[str, Any]]:
+    async def fetch_and_ingest_years(self, ticker: str, selected_years: List[Any]) -> List[Dict[str, Any]]:
         ticker = ticker.upper()
         target_dir = Path("data/sample_filings")
         results = []
 
-        for idx, yr in enumerate(sorted(selected_years, reverse=True)):
+        clean_years = [int(y) for y in selected_years if str(y).isdigit()]
+
+        for idx, yr in enumerate(sorted(clean_years, reverse=True)):
             pdf_path = self.generate_annual_filing_pdf_for_year(ticker, target_dir, year=yr)
             res = await self.pipeline.process_file(pdf_path, ticker_override=ticker)
             results.append(res)
-            # Pacing delay between years to respect rate limits
-            if idx < len(selected_years) - 1:
+            if idx < len(clean_years) - 1:
                 await asyncio.sleep(1.5)
 
         return results
