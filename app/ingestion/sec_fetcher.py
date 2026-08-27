@@ -8,8 +8,9 @@ from app.ingestion.pipeline import IngestionPipeline
 
 class SECFilingFetcher:
     """
-    10-Year Annual SEC 10-K Filing Generator & Extractor.
-    Supports both async and synchronous execution.
+    10-Year Annual SEC 10-K Filing Generator & Extractor:
+    Discovers available historical years and extracts real financial statements.
+    Provides both async and synchronous execution helpers for Streamlit.
     """
 
     def __init__(self):
@@ -29,6 +30,7 @@ class SECFilingFetcher:
 
         current_year = 2025
         ten_year_range = list(range(current_year - 9, current_year + 1))
+
         all_years = sorted(list(set(ten_year_range).union(discovered_years)), reverse=True)
         return all_years[:10]
 
@@ -153,17 +155,10 @@ class SECFilingFetcher:
         return results
 
     def fetch_and_ingest_years_sync(self, ticker: str, selected_years: List[int]) -> List[Dict[str, Any]]:
-        """Synchronous wrapper for thread-safe Streamlit execution."""
+        """Synchronous wrapper for Streamlit execution."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             return loop.run_until_complete(self.fetch_and_ingest_years(ticker, selected_years))
         finally:
             loop.close()
-
-    async def fetch_and_ingest(self, ticker: str) -> Dict[str, Any]:
-        results = await self.fetch_and_ingest_years(ticker, [2025])
-        return results[0] if results else {}
-
-    def fetch_and_ingest_sync(self, ticker: str) -> Dict[str, Any]:
-        return self.fetch_and_ingest_years_sync(ticker, [2025])[0]

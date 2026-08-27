@@ -6,7 +6,7 @@ from google import genai
 from google.genai import types
 from sqlalchemy import select
 from app.core.config import get_settings
-from app.core.database import SyncSessionLocal
+from app.core.database import AsyncSessionLocal
 from app.models.domain import Company, Document, FinancialMetric
 from app.rag.retriever import HybridRetriever
 from app.core.cache import semantic_cache
@@ -16,7 +16,7 @@ settings = get_settings()
 class FinancialQAService:
     """
     Enterprise Structured + Unstructured Hybrid Financial Reasoning Engine.
-    100% Thread-Safe for Streamlit and FastAPI.
+    Enforces explicit fiscal year tagging across all rankings.
     """
 
     MODEL_CASCADE = [
@@ -31,15 +31,16 @@ class FinancialQAService:
         self.retriever = HybridRetriever()
         self.client = genai.Client(api_key=settings.GEMINI_API_KEY.strip().strip("'").strip('"'))
 
-    def _fetch_all_companies_structured_metrics(self) -> List[Dict[str, Any]]:
-        """Synchronously fetches all structured metrics using SyncSessionLocal."""
-        with SyncSessionLocal() as session:
+    async def _fetch_all_companies_structured_metrics(self) -> List[Dict[str, Any]]:
+        """Fetches the latest annual metrics for every company in the database."""
+        async with AsyncSessionLocal() as session:
             stmt = select(Company, Document, FinancialMetric).\
                 join(Document, Company.id == Document.company_id).\
                 join(FinancialMetric, Document.id == FinancialMetric.document_id).\
                 where(Document.form_type == "10-K").\
                 order_by(Company.ticker, Document.fiscal_year.desc())
-            rows = session.execute(stmt).all()
+            res = await session.execute(stmt)
+            rows = res.all()
 
             latest_map = {}
             for comp, doc, met in rows:
@@ -61,21 +62,18 @@ class FinancialQAService:
                     }
             return list(latest_map.values())
 
-    def answer_question_sync(self, question: str, ticker: str = "ALL", top_k: int = 6) -> Dict[str, Any]:
+    async def answer_question(self, question: str, ticker: str = "ALL", top_k: int = 6) -> Dict[str, Any]:
         start_time = time.perf_counter()
         target_ticker = None if ticker.upper() in ["ALL", "PORTFOLIO", ""] else ticker.upper()
 
-        # Step 0: Check Semantic Vector Cache
         cached_result = semantic_cache.get_semantic(query=question, ticker=ticker)
         if cached_result:
             payload, _ = cached_result
             payload["latency_ms"] = round((time.perf_counter() - start_time) * 1000, 2)
             return payload
 
-        all_metrics = self._fetch_all_companies_structured_metrics()
-
-        # Step 1: Execute Hybrid Search
-        retrieved_chunks = self.retriever.retrieve_sync(query=question, ticker=target_ticker, top_k=top_k)
+        all_metrics = await self._fetch_all_companies_structured_metrics()
+        retrieved_chunks = await self.retriever.retrieve(query=question, ticker=target_ticker, top_k=top_k)
 
         citations_list = []
         context_blocks = []
@@ -96,7 +94,6 @@ class FinancialQAService:
             })
             context_blocks.append(f"--- EXCERPT {idx} [{c_ticker} | Form 10-K | {section} | Page {page_num}] ---\n{chunk_text}")
 
-        # Format complete database portfolio metrics table with explicit fiscal years
         structured_portfolio_text = "PORTFOLIO FINANCIAL DATABASE (ALL INGESTED COMPANIES):\n"
         for m in all_metrics:
             rev_str = f"${m['revenue_m']/1000:.2f}B" if m['revenue_m'] >= 1000 else f"${m['revenue_m']:,.0f}M"
@@ -111,15 +108,15 @@ class FinancialQAService:
 
         narrative_context = "\n\n".join(context_blocks)
 
-        # Step 2: Direct Institutional Communication Prompt
         system_prompt = f"""
 You are a Senior Equity Research Analyst & Portfolio Manager.
 
 CRITICAL COMMUNICATION GUIDELINES:
-1. ALWAYS GIVE A DIRECT ANSWER FIRST. In the very first sentence, state the direct conclusion (name the specific company, its exact metric, and its explicit Fiscal Year).
+1. ALWAYS GIVE A DIRECT ANSWER FIRST. State the direct winner and its exact fiscal year and percentage in the very first sentence.
 2. For comparative or ranking questions (e.g. 'highest margin', 'highest revenue', 'compare companies'):
-   - Look at ALL companies in the Portfolio Financial Database below (Apple, Alphabet, Tesla, Palantir, Microsoft, etc.).
-   - Provide a clean, ranked comparison with exact numbers and include the Fiscal Year (e.g. PLTR [FY2025]: 82.4%, AAPL [FY2024]: 46.2%).
+   - Look at ALL companies in the Portfolio Financial Database below (Palantir, Apple, Alphabet, Verisign, Tesla, etc.).
+   - ALWAYS explicitly include the fiscal year in parentheses for EVERY company in the ranking (e.g., '1. PLTR (Palantir - FY2025): 82.4%', '2. AAPL (Apple - FY2024): 46.2%').
+   - State upfront: 'Comparing the Latest Reported 10-K Filings:' or specify the exact fiscal year analyzed.
 3. DO NOT dump irrelevant walls of text or raw balance sheet lists. Keep the response concise, sharp, and institutional.
 4. Conclude with a brief parenthetical citation (e.g., Form 10-K Item 8 / Item 1A).
 
@@ -134,7 +131,6 @@ CRITICAL COMMUNICATION GUIDELINES:
 Direct Institutional Response:
 """
 
-        # Step 3: Multi-Model Generation
         generated_answer = None
         for model_id in self.MODEL_CASCADE:
             for attempt in range(2):
@@ -172,6 +168,3 @@ Direct Institutional Response:
 
         semantic_cache.set_semantic(query=question, ticker=ticker, payload=response_payload)
         return response_payload
-
-    async def answer_question(self, question: str, ticker: str = "ALL", top_k: int = 6) -> Dict[str, Any]:
-        return self.answer_question_sync(question, ticker, top_k)
