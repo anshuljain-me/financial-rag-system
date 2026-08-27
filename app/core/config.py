@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
-# Automatically bridge Streamlit Cloud secrets to environment variables if running in Cloud
 try:
     import streamlit as st
     if hasattr(st, "secrets"):
@@ -16,7 +15,6 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Institutional Financial RAG & SEC Intelligence"
     BASE_DIR: Path = Path(__file__).resolve().parent.parent.parent
     
-    # Database URLs (supports multiple aliases for cloud compatibility)
     NEON_DB_ASYNC_URL: str = os.getenv("NEON_DB_ASYNC_URL", os.getenv("DATABASE_URL", ""))
     NEON_DB_SYNC_URL: str = os.getenv("NEON_DB_SYNC_URL", os.getenv("SYNC_DATABASE_URL", ""))
     DATABASE_URL: str = os.getenv("NEON_DB_ASYNC_URL", os.getenv("DATABASE_URL", ""))
